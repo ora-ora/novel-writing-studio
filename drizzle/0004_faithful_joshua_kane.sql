@@ -1,0 +1,1 @@
+ALTER TABLE `chapters` ADD `continuity_review` integer DEFAULT 0 NOT NULL;

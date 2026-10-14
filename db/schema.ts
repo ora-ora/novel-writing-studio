@@ -21,6 +21,7 @@ export const chapters = sqliteTable("chapters", {
   body: text("body").notNull().default(""),
   outlineRevision: integer("outline_revision").notNull().default(1),
   bodyOutlineRevision: integer("body_outline_revision"),
+  continuityReview: integer("continuity_review").notNull().default(0),
   updatedAt: text("updated_at").notNull(),
   memory: text("memory").notNull().default(""),
 }, (table) => [index("idx_chapters_project_position").on(table.projectId, table.position)]);

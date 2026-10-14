@@ -24,7 +24,7 @@ function parseChapters(text:string) {
 }
 export async function POST(request:Request) {
   try {
-    const input = await request.json() as {kind:string; endpoint:string; key:string; model:string; title:string; premise:string; summary:string; important_notes:string; genre:string; style:string; chapters:Chapter[]; selected?:Chapter; instruction?:string; count?:number; temperature?:number; field?:string; operation?:string; stream?:boolean; projectId?:string; selection?:string};
+    const input = await request.json() as {kind:string; endpoint:string; key:string; model:string; title:string; premise:string; summary:string; important_notes:string; genre:string; style:string; chapters:Chapter[]; selected?:Chapter; instruction?:string; count?:number; temperature?:number; field?:string; operation?:string; stream?:boolean; projectId?:string; selection?:string; afterChapterId?:string; cursor?:number};
     const defaultEndpoint = "https://api.deepseek.com/chat/completions";
     const defaultModel = "deepseek-flash";
     const useHostedDeepSeek =
@@ -52,12 +52,25 @@ export async function POST(request:Request) {
     let prompt = ""; let json = false;
     if (kind === "outline") { json = true; prompt = `${context}\n请规划${count}章小说大纲。每章有具体标题与120到250字的剧情概述，推进人物动机、冲突与伏笔，结尾有发展空间。附加要求：${instruction}\n只返回 JSON 数组：[ {\"title\":\"章节标题\",\"synopsis\":\"章节概述\"} ]，不要其他文字。`; }
     else if (kind === "append") { json = true; prompt = `${context}\n当前章节大纲：\n${outline}\n请紧接当前结局追加${count}章，保持人物和时间线连贯，不重复旧章节。附加要求：${instruction}\n只返回 JSON 数组：[ {\"title\":\"章节标题\",\"synopsis\":\"章节概述\"} ]。`; }
+    else if (kind === "insert") {
+      json=true;
+      const at=input.afterChapterId?chapters.findIndex(c=>c.id===input.afterChapterId)+1:0;
+      if(input.afterChapterId&&at===0)return error("插入位置不存在");
+      const before=chapters[at-1],after=chapters[at];
+      prompt=`${context}\n全书现有大纲：\n${outline}\n请在${before?`「${before.title}」之后`:"全书开头"}、${after?`「${after.title}」之前`:"现有结尾之后"}插入${count}章。前章结局：${before?.synopsis||"无"}。后章开端：${after?.synopsis||"无"}。写出承上启下的新事件，保持人物、时间、伏笔和已有章节事实不变；不得重写已有章节。附加要求：${instruction}\n只返回新章节的 JSON 数组：[ {\"title\":\"章节标题\",\"synopsis\":\"章节概述\"} ]。`;
+    }
     else if (kind === "rewrite" && input.selected) { json = true; prompt = `${context}\n全书已有大纲：\n${outline}\n仅重写目标章节「${input.selected.title}」的标题和概述，保持相邻剧情衔接。修改要求：${instruction || "增强情节张力与连贯性"}\n只返回一个元素的 JSON 数组：[ {\"title\":\"章节标题\",\"synopsis\":\"章节概述\"} ]。`; }
     else if (kind === "body" && input.selected) {
       const index = chapters.findIndex(c=>c.id===input.selected?.id);
       const memories = chapters.slice(0,index).map((c,i)=>`第${i+1}章已发生事实：${(c as Chapter & {memory?:string}).memory||c.synopsis}`).join("\n").slice(-10000);
       const previous = chapters.slice(Math.max(0,index-3),index).map((c,i)=>`前文第${i+1}章 ${c.title}：${c.synopsis}\n正文末段：${(c.body||"").slice(-1400)}`).join("\n");
       prompt = `${context}\n全书大纲：\n${outline}\n前文记忆：\n${memories}\n前文参考：\n${previous}\n现在创作「${input.selected.title}」正文，章节概述：${input.selected.synopsis}\n写出完整有场景、动作、对话与细节的小说正文，约2000到3000汉字。遵守大纲但自然展开，避免总结式叙述，不要重复书名或输出说明。附加要求：${instruction}`;
+    } else if(kind==="continue"&&input.selected?.body){
+      const body=String(input.selected.body);
+      const cursor=Math.min(body.length,Math.max(0,input.cursor==null?body.length:Number(input.cursor)||0));
+      prompt=`${context}\n全书大纲：\n${outline}\n本章「${input.selected.title}」概述：${input.selected.synopsis}\n光标前的正文末段：\n${body.slice(Math.max(0,cursor-7000),cursor)}\n光标后已有文字（不可重复或改动）：\n${body.slice(cursor,cursor+1500)||"（正文末尾）"}\n请从光标处自然续写约600到1200汉字，承接动作与情绪，不重述已写情节，不提前泄露尚未揭示的伏笔。附加要求：${instruction}\n只输出要插入的文字，不要标题或解释。`;
+    } else if(kind==="bodyRewrite"&&input.selected?.body){
+      prompt=`${context}\n全书大纲：\n${outline}\n本章「${input.selected.title}」概述：${input.selected.synopsis}\n原正文：\n${String(input.selected.body).slice(0,30000)}\n请根据要求重写整章，保留人物、事实、伏笔和相邻章节连续性，写成完整小说正文，不要解释。修改要求：${instruction||"改善场景与节奏，避免重复叙述"}`;
     } else if (kind === "projectField") {
       const field = input.field;
       const operation = input.operation;
@@ -96,7 +109,7 @@ export async function POST(request:Request) {
     }
     const controller = new AbortController(); const timer = setTimeout(()=>controller.abort(),110000);
     let response:Response;
-    try { response = await fetch(url,{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${key}`},body:JSON.stringify({model:input.model,messages:[{role:"system",content:"你是专业中文小说编辑与写作助手。严格遵守用户的输出格式要求。"},{role:"user",content:prompt}],temperature:Math.min(1.5,Math.max(0,Number(input.temperature) || 0.8)),max_tokens:kind==="body"?6000:4000,...(input.stream?{stream:true}:{})}),signal:controller.signal}); }
+    try { response = await fetch(url,{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${key}`},body:JSON.stringify({model:input.model,messages:[{role:"system",content:"你是专业中文小说编辑与写作助手。严格遵守用户的输出格式要求。"},{role:"user",content:prompt}],temperature:Math.min(1.5,Math.max(0,Number(input.temperature) || 0.8)),max_tokens:["body","bodyRewrite"].includes(kind)?6000:4000,...(input.stream?{stream:true}:{})}),signal:controller.signal}); }
     finally {clearTimeout(timer);}
     if (!response.ok) return error(`模型服务返回 ${response.status}。请检查地址、密钥和模型名称。`,502);
     if(input.stream){
