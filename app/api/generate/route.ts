@@ -123,26 +123,26 @@ export async function POST(request:Request) {
       }
       if(!response.body){clearTimeout(timer);return error("模型不支持流式输出",502);}
       const reader=response.body.getReader(),decoder=new TextDecoder(),encoder=new TextEncoder();
-      let buffer="",full="";
+      let buffer="",full="",cancelled=false;
       const stream=new ReadableStream({
         start(out){void (async()=>{
           try{
             while(true){
               const {done,value}=await reader.read();
-              if(done){clearTimeout(timer);out.enqueue(encoder.encode(`data: ${JSON.stringify({done:true,...(json?{chapters:parseChapters(full)}:{text:full})})}\n\n`));out.close();return;}
+              if(done){clearTimeout(timer);if(!cancelled){out.enqueue(encoder.encode(`data: ${JSON.stringify({done:true,...(json?{chapters:parseChapters(full)}:{text:full})})}\n\n`));out.close();}return;}
               buffer+=decoder.decode(value,{stream:true});
               const lines=buffer.split("\n");buffer=lines.pop()||"";
               for(const line of lines){
                 if(!line.startsWith("data:"))continue;
                 const raw=line.slice(5).trim();if(raw==="[DONE]")continue;
                 try{const delta=(JSON.parse(raw) as {choices?:Array<{delta?:{content?:string}}>}).choices?.[0]?.delta?.content||"";
-                  if(delta){full+=delta;out.enqueue(encoder.encode(`data: ${JSON.stringify({delta})}\n\n`));}
+                  if(delta&&!cancelled){full+=delta;out.enqueue(encoder.encode(`data: ${JSON.stringify({delta})}\n\n`));}
                 }catch{/* Ignore non-content SSE events. */}
               }
             }
-          }catch(e){clearTimeout(timer);out.enqueue(encoder.encode(`data: ${JSON.stringify({error:e instanceof Error?e.message:"生成中断"})}\n\n`));out.close();}
+          }catch(e){clearTimeout(timer);if(!cancelled){try{out.enqueue(encoder.encode(`data: ${JSON.stringify({error:e instanceof Error?e.message:"生成中断"})}\n\n`));out.close();}catch{/* Client disconnected. */}}}
         })();},
-        cancel(){clearTimeout(timer);void reader.cancel();controller.abort();}
+        cancel(){cancelled=true;clearTimeout(timer);void reader.cancel();controller.abort();}
       });
       return new Response(stream,{headers:{"Content-Type":"text/event-stream; charset=utf-8","Cache-Control":"no-cache","X-Accel-Buffering":"no"}});
     }
