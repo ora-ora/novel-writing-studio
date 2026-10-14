@@ -36,6 +36,13 @@
       "when": 1791950094993,
       "tag": "0004_faithful_joshua_kane",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1791967502185,
+      "tag": "0005_sparkling_raider",
+      "breakpoints": true
     }
   ]
 }

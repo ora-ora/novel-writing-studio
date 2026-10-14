@@ -10,6 +10,7 @@ export const projects = sqliteTable("projects", {
   style: text("style").notNull().default(""),
   updatedAt: text("updated_at").notNull(),
   workspaceId: text("workspace_id").notNull().default("legacy"),
+  deletedAt: text("deleted_at"),
 });
 
 export const chapters = sqliteTable("chapters", {
@@ -24,6 +25,7 @@ export const chapters = sqliteTable("chapters", {
   continuityReview: integer("continuity_review").notNull().default(0),
   updatedAt: text("updated_at").notNull(),
   memory: text("memory").notNull().default(""),
+  deletedAt: text("deleted_at"),
 }, (table) => [index("idx_chapters_project_position").on(table.projectId, table.position)]);
 
 export const loreCards = sqliteTable("lore_cards", {

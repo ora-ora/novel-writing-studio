@@ -41,7 +41,9 @@ export async function POST(request:Request) {
     const outline = chapters.map((c,i)=>`第${i+1}章 ${c.title}：${c.synopsis}`).join("\n").slice(0,30000);
     let cardContext="";
     if(input.projectId){
-      const cards=await env.DB?.prepare("SELECT l.* FROM lore_cards l JOIN projects p ON p.id=l.project_id WHERE p.id=? AND p.workspace_id=?").bind(input.projectId,session.id).all<{category:string;content:string;from_chapter:number|null;until_chapter:number|null}>();
+      const active=await env.DB?.prepare("SELECT id FROM projects WHERE id=? AND workspace_id=? AND deleted_at IS NULL").bind(input.projectId,session.id).first();
+      if(!active)return error("作品不存在或已删除",403);
+      const cards=await env.DB?.prepare("SELECT l.* FROM lore_cards l JOIN projects p ON p.id=l.project_id WHERE p.id=? AND p.workspace_id=? AND p.deleted_at IS NULL").bind(input.projectId,session.id).all<{category:string;content:string;from_chapter:number|null;until_chapter:number|null}>();
       const chapterIndex=chapters.findIndex(c=>c.id===input.selected?.id)+1;
       cardContext=(cards?.results||[]).filter(c=>!chapterIndex||(!c.from_chapter||chapterIndex>=c.from_chapter)&&(!c.until_chapter||chapterIndex<=c.until_chapter)).map(c=>`[${c.category}] ${c.content}`).join("\n").slice(0,12000);
     }
