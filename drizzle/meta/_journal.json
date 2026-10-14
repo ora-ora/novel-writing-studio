@@ -15,6 +15,20 @@
       "when": 1791943539662,
       "tag": "0001_long_wolfpack",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791946692692,
+      "tag": "0002_pretty_hellion",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1791947249908,
+      "tag": "0003_equal_nocturne",
+      "breakpoints": true
     }
   ]
 }

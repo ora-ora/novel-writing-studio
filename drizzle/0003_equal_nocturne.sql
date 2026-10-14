@@ -1,0 +1,1 @@
+ALTER TABLE `lore_cards` ADD `done` integer DEFAULT 0 NOT NULL;
