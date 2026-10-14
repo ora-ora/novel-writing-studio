@@ -109,26 +109,27 @@ export async function POST(request:Request) {
     }
     const controller = new AbortController(); const timer = setTimeout(()=>controller.abort(),110000);
     let response:Response;
-    try { response = await fetch(url,{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${key}`},body:JSON.stringify({model:input.model,messages:[{role:"system",content:"你是专业中文小说编辑与写作助手。严格遵守用户的输出格式要求。"},{role:"user",content:prompt}],temperature:Math.min(1.5,Math.max(0,Number(input.temperature) || 0.8)),max_tokens:["body","bodyRewrite"].includes(kind)?6000:4000,...(input.stream?{stream:true}:{})}),signal:controller.signal}); }
-    finally {clearTimeout(timer);}
-    if (!response.ok) return error(`模型服务返回 ${response.status}。请检查地址、密钥和模型名称。`,502);
+    try { response = await fetch(url,{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${key}`},body:JSON.stringify({model:input.model,messages:[{role:"system",content:"你是专业中文小说编辑与写作助手。严格遵守用户的输出格式要求。"},{role:"user",content:prompt}],temperature:Math.min(1.5,Math.max(0,Number(input.temperature) || 0.8)),max_tokens:["body","bodyRewrite"].includes(kind)?6000:4000,...(useHostedDeepSeek?{thinking:{type:"disabled"}}:{}),...(input.stream?{stream:true}:{})}),signal:controller.signal}); }
+    catch(e){clearTimeout(timer);throw e;}
+    if (!response.ok){clearTimeout(timer);return error(`模型服务返回 ${response.status}。请检查地址、密钥和模型名称。`,502);}
     if(input.stream){
       if(!response.headers.get("Content-Type")?.includes("text/event-stream")){
-        const fallback=await response.json() as {choices?:Array<{message?:{content?:string}}>} ;
+        let fallback:{choices?:Array<{message?:{content?:string}}>};
+        try{fallback=await response.json() as typeof fallback;}finally{clearTimeout(timer);}
         const text=fallback.choices?.[0]?.message?.content||"";
         if(!text)return error("模型没有返回内容",502);
         const result=json?{chapters:parseChapters(text)}:{text};
         return new Response(`data: ${JSON.stringify({delta:text})}\n\ndata: ${JSON.stringify({done:true,...result})}\n\n`,{headers:{"Content-Type":"text/event-stream; charset=utf-8","Cache-Control":"no-cache"}});
       }
-      if(!response.body)return error("模型不支持流式输出",502);
+      if(!response.body){clearTimeout(timer);return error("模型不支持流式输出",502);}
       const reader=response.body.getReader(),decoder=new TextDecoder(),encoder=new TextEncoder();
       let buffer="",full="";
       const stream=new ReadableStream({
-        async pull(out){
+        start(out){void (async()=>{
           try{
             while(true){
               const {done,value}=await reader.read();
-              if(done){out.enqueue(encoder.encode(`data: ${JSON.stringify({done:true,...(json?{chapters:parseChapters(full)}:{text:full})})}\n\n`));out.close();return;}
+              if(done){clearTimeout(timer);out.enqueue(encoder.encode(`data: ${JSON.stringify({done:true,...(json?{chapters:parseChapters(full)}:{text:full})})}\n\n`));out.close();return;}
               buffer+=decoder.decode(value,{stream:true});
               const lines=buffer.split("\n");buffer=lines.pop()||"";
               for(const line of lines){
@@ -138,15 +139,15 @@ export async function POST(request:Request) {
                   if(delta){full+=delta;out.enqueue(encoder.encode(`data: ${JSON.stringify({delta})}\n\n`));}
                 }catch{/* Ignore non-content SSE events. */}
               }
-              return;
             }
-          }catch(e){out.enqueue(encoder.encode(`data: ${JSON.stringify({error:e instanceof Error?e.message:"生成中断"})}\n\n`));out.close();}
-        },
-        cancel(){void reader.cancel();controller.abort();}
+          }catch(e){clearTimeout(timer);out.enqueue(encoder.encode(`data: ${JSON.stringify({error:e instanceof Error?e.message:"生成中断"})}\n\n`));out.close();}
+        })();},
+        cancel(){clearTimeout(timer);void reader.cancel();controller.abort();}
       });
       return new Response(stream,{headers:{"Content-Type":"text/event-stream; charset=utf-8","Cache-Control":"no-cache","X-Accel-Buffering":"no"}});
     }
-    const result = await response.json() as {choices?:Array<{message?:{content?:string}}>;error?:{message?:string}};
+    let result:{choices?:Array<{message?:{content?:string}}>;error?:{message?:string}};
+    try{result=await response.json() as typeof result;}finally{clearTimeout(timer);}
     const content = result.choices?.[0]?.message?.content;
     if (!content) return error(result.error?.message || "模型没有返回内容",502);
     if (json) return Response.json({chapters:parseChapters(content)});
