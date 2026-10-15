@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, Plus, Settings2, Sparkles, PenLine, Download, ChevronUp, ChevronDown, Trash2, PanelLeftClose, PanelLeftOpen, RefreshCw, Check, X, ArrowRight, FileText } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -9,9 +9,10 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Toaster, toast } from "sonner";
+import ContinuousReader, { ReaderAction, ReaderJump } from "./ContinuousReader";
+import { Chapter, fetchChapterBatch, hasBody } from "@/lib/chapters";
 
 type Project = {id:string;title:string;summary:string;story_bible:string;genre:string;style:string;updated_at:string;};
-type Chapter = {id:string;project_id:string;position:number;title:string;synopsis:string;body:string;memory:string;continuity_review:number;outline_revision:number;body_outline_revision:number|null};
 type Snapshot = {id:string;project_id:string;reason:string;created_at:string};
 type SavedDraft = {id:string;project_id:string;kind:string;target_id:string|null;content:string;created_at:string};
 type ModelConfig = {endpoint:string;model:string;key:string;temperature:number};
@@ -50,8 +51,15 @@ export default function Home() {
   const [projectId,setProjectId]=useState("");
   const [chapterId,setChapterId]=useState("");
   const [mode,setMode]=useState<"outline"|"body">("outline");
+  const [view,setView]=useState<"read"|"edit">("read");
+  const [readingChapterId,setReadingChapterId]=useState("");
+  const [readerJump,setReaderJump]=useState<ReaderJump|null>(null);
+  const [detailBusy,setDetailBusy]=useState(false);
+  const [detailError,setDetailError]=useState("");
+  const [exportBusy,setExportBusy]=useState(false);
   const [loading,setLoading]=useState(true);
   const [busy,setBusy]=useState(false);
+  const [generationKind,setGenerationKind]=useState<Proposal["kind"]|"test"|null>(null);
   const [addingChapter,setAddingChapter]=useState(false);
   const [saving,setSaving]=useState(false);
   const [saveError,setSaveError]=useState(false);
@@ -84,25 +92,36 @@ export default function Home() {
   const pending=useRef<Record<string,ReturnType<typeof setTimeout>>>({});
   const addChapterPending=useRef(false);
   const pendingPatch=useRef<Record<string,Partial<Chapter>>>({});
+  const saveRequests=useRef(new Map<string,Promise<boolean>>());
   const generationAbort=useRef<AbortController|null>(null);
   const streamingRef=useRef("");
   const streamBox=useRef<HTMLDivElement|null>(null);
   const fieldStreamBox=useRef<HTMLParagraphElement|null>(null);
   const followStream=useRef(true);
   const selectionOperation=useRef("rewrite");
+  const generationPending=useRef(false);
+  const navigationSequence=useRef(0);
+  const chapterRows=useRef(allChapters);chapterRows.current=allChapters;
+  const chapterRequests=useRef(new Map<string,Promise<Chapter>>());
+  const detailOrder=useRef<string[]>([]);
+  const directory=useRef<HTMLDivElement>(null);
   const project=projects.find(p=>p.id===projectId);
-  const chapters=allChapters.filter(c=>c.project_id===projectId).sort((a,b)=>a.position-b.position);
+  const chapters=useMemo(()=>allChapters.filter(c=>c.project_id===projectId).sort((a,b)=>a.position-b.position||a.id.localeCompare(b.id)),[allChapters,projectId]);
   const chapter=chapters.find(c=>c.id===chapterId);
+  const readingChapter=chapters.find(c=>c.id===readingChapterId)||chapter;
 
   const load=useCallback(async()=>{
     try {
       const response=await fetch("/api/workspace",{cache:"no-store"});const data=await response.json() as {error?:string;projects:Project[];chapters:Chapter[];snapshots:Snapshot[];drafts:SavedDraft[]};
       if(!response.ok) throw new Error(data.error);
-      setProjects(data.projects);setAllChapters(data.chapters.map(c=>{
+      setProjects(data.projects);setAllChapters(previous=>data.chapters.map(c=>{
         let backup:Partial<Chapter>={};
         try{backup=JSON.parse(localStorage.getItem("novel-backup-"+c.id)||"{}") as Partial<Chapter>;}catch{}
         if(Object.keys(backup).length){pendingPatch.current[c.id]={...backup,...pendingPatch.current[c.id]};setSaveError(true);}
-        return {...c,...backup,...pendingPatch.current[c.id]};
+        const old=previous.find(item=>item.id===c.id);
+        const cached=old?.updated_at===c.updated_at?{body:old.body,synopsis:old.synopsis,memory:old.memory,body_loaded:old.body_loaded,outline_loaded:old.outline_loaded}:{};
+        const patch={...backup,...pendingPatch.current[c.id]};
+        return {...c,...cached,...patch,...(typeof patch.body==="string"?{body_length:patch.body.length}: {})};
       }));
       setSnapshots(data.snapshots||[]);setDrafts(data.drafts||[]);
       setProjectId(current=>data.projects.some((p:Project)=>p.id===current)?current:(data.projects[0]?.id||""));
@@ -110,8 +129,43 @@ export default function Home() {
     } catch(e){toast.error(e instanceof Error?e.message:"读取失败");}
     finally{setLoading(false);}
   },[]);
+  const ensureChapter=useCallback(async(id:string):Promise<Chapter>=>{
+    const current=chapterRows.current.find(c=>c.id===id);
+    if(!current)throw new Error("目标章节不存在，请刷新目录");
+    if(current.body_loaded)return {...current,...pendingPatch.current[id]};
+    const key=`${id}:${current.updated_at}`;
+    const existing=chapterRequests.current.get(key);if(existing)return existing;
+    const request=fetchChapterBatch(current.project_id,[id],"body").then(rows=>{
+      const row={...rows[0],...pendingPatch.current[id]};
+      detailOrder.current=[...detailOrder.current.filter(key=>key!==id),id].slice(-6);
+      setAllChapters(items=>items.map(item=>{
+        if(item.id===id&&item.updated_at===current.updated_at)return row;
+        if(item.body_loaded&&!detailOrder.current.includes(item.id)&&!pendingPatch.current[item.id])return {...item,body:"",body_loaded:false};
+        return item;
+      }));
+      return row;
+    }).finally(()=>chapterRequests.current.delete(key));
+    chapterRequests.current.set(key,request);return request;
+  },[]);
   useEffect(()=>{void load();},[load]);
+  useEffect(()=>{
+    if(view!=="edit"||!chapterId||chapter?.body_loaded){setDetailBusy(false);setDetailError("");return;}
+    let active=true;setDetailBusy(true);setDetailError("");
+    void ensureChapter(chapterId).catch(error=>{if(active)setDetailError(error instanceof Error?error.message:"章节加载失败");}).finally(()=>{if(active)setDetailBusy(false);});
+    return()=>{active=false;};
+  },[view,chapterId,chapter?.updated_at,chapter?.body_loaded,ensureChapter]);
   useEffect(()=>{if(window.matchMedia("(max-width: 850px)").matches)setSidebar(false);},[]);
+  useEffect(()=>{
+    if(view!=="read"||!sidebar)return;
+    const list=directory.current, item=list?.querySelector<HTMLElement>(".chapter-item.selected");
+    if(!list||!item)return;
+    const bounds=list.getBoundingClientRect(),rect=item.getBoundingClientRect();
+    if(rect.top<bounds.top)list.scrollTop+=rect.top-bounds.top;
+    else if(rect.bottom>bounds.bottom)list.scrollTop+=rect.bottom-bounds.bottom;
+  },[readingChapterId,sidebar,view]);
+  useEffect(()=>{
+    if(view==="edit"&&window.matchMedia("(max-width: 650px)").matches)window.scrollTo({top:0,behavior:"instant"});
+  },[view,chapterId]);
   useEffect(()=>{try{const saved=JSON.parse(localStorage.getItem("novel-model")||"null") as Partial<ModelConfig>|null;if(saved?.endpoint&&saved.model)setModel({...defaultModel,...saved,key:""});}catch{}},[]);
   useEffect(()=>{localStorage.setItem("novel-model",JSON.stringify({endpoint:model.endpoint,model:model.model,temperature:model.temperature}));},[model.endpoint,model.model,model.temperature]);
   useEffect(()=>{try{const d=JSON.parse(localStorage.getItem("novel-new-draft")||"null") as {title?:string;premise?:string;summary?:string;notes?:string;story_bible?:string}|null;if(d){setDraftTitle(d.title||"");setDraftSummary(d.summary||"");setDraftStoryBible(d.story_bible||[d.premise&&`# 世界与规则\n${d.premise}`,d.notes&&`# 重要提示\n${d.notes}`].filter(Boolean).join("\n\n"));}}catch{}setDraftLoaded(true);},[]);
@@ -120,23 +174,33 @@ export default function Home() {
   useEffect(()=>{if(fieldProposal?.draft)localStorage.setItem("novel-field-proposal",JSON.stringify(fieldProposal));else localStorage.removeItem("novel-field-proposal");},[fieldProposal]);
   useEffect(()=>{if(followStream.current){if(streamBox.current)streamBox.current.scrollTop=streamBox.current.scrollHeight;if(fieldStreamBox.current)fieldStreamBox.current.scrollTop=fieldStreamBox.current.scrollHeight;}},[streaming]);
   useEffect(()=>{if(projectId && !chapters.some(c=>c.id===chapterId)) setChapterId(chapters[0]?.id||"");},[projectId,chapterId,chapters.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(()=>{
+    if(view==="read"&&readingChapterId&&!busy&&!fieldBusy&&!reviewBusy&&!proposal&&!generationPending.current&&chapters.some(c=>c.id===readingChapterId))setChapterId(readingChapterId);
+  },[view,readingChapterId,busy,fieldBusy,reviewBusy,proposal,chapters]);
   useEffect(()=>{setInsertAfterId(chapterId||"__start__");setBodyCursor(null);},[chapterId,projectId]);
   useEffect(()=>()=>{Object.values(pending.current).forEach(clearTimeout);},[]);
   async function post(action:string,fields:Record<string,unknown>={}){
     const r=await fetch("/api/workspace",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,...fields})});
     const data=await r.json() as {error?:string;id:string;outlineRevision?:number};if(!r.ok) throw new Error(data.error||"保存失败");return data;
   }
-  async function flushChapter(id:string){
+  async function flushChapter(id:string):Promise<boolean>{
     clearTimeout(pending.current[id]);
+    const active=saveRequests.current.get(id);
+    if(active){if(!await active)return false;return flushChapter(id);}
     const values=pendingPatch.current[id];if(!values)return true;
     setSaving(true);
-    try{const result=await post("updateChapter",{id,...values});delete pendingPatch.current[id];if(result.outlineRevision)setAllChapters(items=>items.map(c=>c.id===id?{...c,outline_revision:result.outlineRevision!}:c));setSaveError(false);localStorage.removeItem("novel-backup-"+id);return true;}
-    catch(e){setSaveError(true);localStorage.setItem("novel-backup-"+id,JSON.stringify(values));toast.error(e instanceof Error?e.message:"保存失败，草稿已暂存在此浏览器");return false;}
-    finally{setSaving(false);}
+    const request=(async()=>{
+      try{const result=await post("updateChapter",{id,...values});if(pendingPatch.current[id]===values){delete pendingPatch.current[id];localStorage.removeItem("novel-backup-"+id);}if(result.outlineRevision)setAllChapters(items=>items.map(c=>c.id===id?{...c,outline_revision:result.outlineRevision!}:c));setSaveError(false);return true;}
+      catch(e){setSaveError(true);localStorage.setItem("novel-backup-"+id,JSON.stringify(pendingPatch.current[id]||values));toast.error(e instanceof Error?e.message:"保存失败，草稿已暂存在此浏览器");return false;}
+      finally{saveRequests.current.delete(id);setSaving(saveRequests.current.size>0);}
+    })();
+    saveRequests.current.set(id,request);
+    if(!await request)return false;
+    return pendingPatch.current[id]?flushChapter(id):true;
   }
   async function flushAllChapters(){for(const id of Object.keys(pendingPatch.current))if(!await flushChapter(id))return false;return true;}
   function updateChapter(id:string,patch:Partial<Chapter>){
-    setAllChapters(items=>items.map(c=>c.id===id?{...c,...patch}:c));
+    setAllChapters(items=>items.map(c=>c.id===id?{...c,...patch,...(typeof patch.body==="string"?{body_length:patch.body.length}: {})}:c));
     pendingPatch.current[id]={...pendingPatch.current[id],...patch};
     clearTimeout(pending.current[id]);
     pending.current[id]=setTimeout(()=>{void flushChapter(id);},650);
@@ -153,13 +217,32 @@ export default function Home() {
   async function switchProject(nextId:string){
     if(nextId===projectId)return;
     if(busy||fieldBusy){toast("请先停止当前生成");return;}
-    if(chapterId&&!await flushChapter(chapterId))return;
+    navigationSequence.current++;
+    if(!await flushAllChapters())return;
     if(projectDirty&&project&&!await saveProject(project))return;
     setProjectId(nextId);
+    setReadingChapterId("");setReaderJump(null);
     setChapterId(allChapters.filter(c=>c.project_id===nextId).sort((a,b)=>a.position-b.position)[0]?.id||"");
     setProposal(null);
     setFieldProposal(null);setBibleSelection({start:0,end:0,text:""});setReviewText("");
     setSelection("");
+  }
+  async function editChapter(id:string){
+    if(busy||fieldBusy||reviewBusy||generationPending.current){toast("请先停止当前生成");return;}
+    const sequence=++navigationSequence.current;
+    if(!await flushAllChapters())return;
+    try{await ensureChapter(id);if(sequence!==navigationSequence.current)return;setChapterId(id);setReaderJump(null);setProposal(null);setSelection("");setView("edit");setMobileAssistantOpen(false);}
+    catch(error){toast.error(error instanceof Error?error.message:"章节加载失败");}
+  }
+  async function readChapters(){navigationSequence.current++;if(await flushAllChapters())setView("read");}
+  function selectReaderChapter(id:string){
+    setReadingChapterId(id);
+    if(!busy&&!fieldBusy&&!reviewBusy&&!proposal&&!generationPending.current)setChapterId(id);
+  }
+  function readerAI(id:string,action:ReaderAction){
+    setMobileAssistantOpen(true);setBodyCursor(null);
+    if(action==="insert")setInsertAfterId(id);
+    void generate(action,id,action==="insert"?id:undefined);
   }
   async function reviewSettings(){
     if(!project||reviewBusy||fieldBusy)return;
@@ -227,7 +310,7 @@ export default function Home() {
   async function addChapter(title="新章节",synopsis=""){
     if(!project||addChapterPending.current)return null;
     addChapterPending.current=true;setAddingChapter(true);
-    try{const result=await post("addChapter",{projectId,title,synopsis});await load();setChapterId(result.id);if(window.matchMedia("(max-width: 850px)").matches)setSidebar(false);return result.id as string;}
+    try{const result=await post("addChapter",{projectId,title,synopsis});await load();setChapterId(result.id);setView("edit");if(window.matchMedia("(max-width: 850px)").matches)setSidebar(false);return result.id as string;}
     catch(e){toast.error(e instanceof Error?e.message:"添加失败");return null;}
     finally{addChapterPending.current=false;setAddingChapter(false);}
   }
@@ -243,8 +326,9 @@ export default function Home() {
     try{await post("reorder",{projectId,ids});}catch(e){toast.error("排序失败");await load();}
   }
   async function streamRequest(payload:Record<string,unknown>,onDelta?:(delta:string)=>void){
+    if(payload.projectId&&!await flushAllChapters())throw new Error("请先保存章节，再使用 AI");
     const controller=new AbortController();generationAbort.current=controller;streamingRef.current="";followStream.current=true;setStreaming("");
-    const response=await fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,stream:true}),signal:controller.signal});
+    const response=await fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,...(payload.projectId?{chapters:[],selected:payload.selected?{id:(payload.selected as Chapter).id}:undefined}:{}),stream:true}),signal:controller.signal});
     if(!response.ok){const result=await response.json() as {error?:string};throw new Error(result.error||"模型调用失败");}
     if(!response.body)throw new Error("模型没有返回流式内容");
     const reader=response.body.getReader(),decoder=new TextDecoder();
@@ -269,37 +353,47 @@ export default function Home() {
     if(!project||!content.trim())return;
     try{const result=await post("saveDraft",{projectId:project.id,kind,targetId,content});setDrafts(items=>[{id:result.id,project_id:project.id,kind,target_id:targetId||null,content,created_at:new Date().toISOString()},...items].slice(0,30));}catch{toast.error("生成草稿未能保存，请复制预览内容");}
   }
-  async function generate(kind:Proposal["kind"]|"test"){
+  async function generate(kind:Proposal["kind"]|"test",requestedTarget?:string,requestedAfter?:string){
+    if(busy||fieldBusy||reviewBusy||generationPending.current)return;
     if(!model.endpoint||!model.model){setSettingsOpen(true);toast("请先配置模型地址和名称");return;}
-    if(!project)return; if(["rewrite","body","continue","bodyRewrite","selection","memory"].includes(kind)&&!chapter)return;
-    if(["continue","bodyRewrite"].includes(kind)&&!chapter?.body.trim()){toast.error("请先写出一些正文");return;}
-    if((kind==="selection"||kind==="memory")&&window.matchMedia("(max-width: 650px)").matches)setMobileAssistantOpen(true);
-    if(projectDirty&&!await saveProject(project))return;
-    if(!await flushAllChapters())return;
-    setBusy(true);setProposal(null);
+    if(!project)return;
+    if(requestedTarget)setChapterId(requestedTarget);
+    generationPending.current=true;streamingRef.current="";setStreaming("");setGenerationKind(kind);setBusy(true);setProposal(null);
+    let target:Chapter|undefined;
     try{
-      const afterChapterId=insertAfterId==="__start__"?"":insertAfterId;
+      if(projectDirty&&!await saveProject(project))return;
+      if(!await flushAllChapters())return;
+      const id=requestedTarget||chapterId;
+      if(kind!=="test"&&id)target=await ensureChapter(id);
+      const chapter=target;
+      if(["rewrite","body","continue","bodyRewrite","selection","memory"].includes(kind)&&!chapter)throw new Error("请先选择目标章节");
+      if(["continue","bodyRewrite"].includes(kind)&&!chapter?.body.trim())throw new Error("请先写出一些正文");
+      if(chapter)setChapterId(chapter.id);
+      if((kind==="selection"||kind==="memory")&&window.matchMedia("(max-width: 650px)").matches)setMobileAssistantOpen(true);
+      const afterChapterId=requestedAfter??(insertAfterId==="__start__"?"":insertAfterId);
       if(kind==="insert"&&afterChapterId&&!chapters.some(c=>c.id===afterChapterId))throw new Error("插入位置已变化，请重新选择");
-      const insertionOffset=bodyCursor===null?chapter?.body.length||0:Math.max(0,Math.min(bodyCursor,chapter?.body.length||0));
+      const insertionOffset=requestedTarget||bodyCursor===null?chapter?.body.length||0:Math.max(0,Math.min(bodyCursor,chapter?.body.length||0));
       const payload={kind,...model,projectId:project.id,title:project.title,summary:project.summary,story_bible:project.story_bible,genre:project.genre,style:project.style,chapters,selected:chapter,instruction,count,selection,operation:selectionOperation.current,afterChapterId,cursor:insertionOffset};
       const {result}=await streamRequest(payload);
       if(!result)throw new Error("生成中断");
       if(kind==="test")toast.success("连接成功");
       else {setProposal({kind,chapters:result.chapters,text:result.text,target:chapter?.id,selection,afterChapterId,insertionOffset,baseBody:chapter?.body});await retainDraft(kind,kind==="selection"?JSON.stringify({text:result.text,selection,start:selectionStart,end:selectionEnd}):["continue","bodyRewrite","insert"].includes(kind)?JSON.stringify({text:result.text,chapters:result.chapters,afterChapterId,insertionOffset,baseBody:chapter?.body}):result.text||JSON.stringify(result.chapters),chapter?.id);toast.success("已生成草稿，请确认后采用");}
-    }catch(e){if(streamingRef.current&&kind!=="test"){setProposal({kind,text:streamingRef.current,target:chapter?.id,selection,afterChapterId:insertAfterId==="__start__"?"":insertAfterId,insertionOffset:bodyCursor??chapter?.body.length,baseBody:chapter?.body});await retainDraft(kind,streamingRef.current,chapter?.id);}if((e as Error).name==="AbortError")toast("已停止，已收到的文字留在预览中");else toast.error(e instanceof Error?e.message:"生成失败");}
-    finally{setBusy(false);generationAbort.current=null;}
+    }catch(e){if(streamingRef.current&&kind!=="test"){setProposal({kind,text:streamingRef.current,target:target?.id,selection,afterChapterId:requestedAfter??(insertAfterId==="__start__"?"":insertAfterId),insertionOffset:requestedTarget?target?.body.length:bodyCursor??target?.body.length,baseBody:target?.body});await retainDraft(kind,streamingRef.current,target?.id);}if((e as Error).name==="AbortError")toast("已停止，已收到的文字留在预览中");else toast.error(e instanceof Error?e.message:"生成失败");}
+    finally{setBusy(false);setGenerationKind(null);generationPending.current=false;generationAbort.current=null;}
   }
   async function acceptProposal(){
     if(!proposal||!project)return;setBusy(true);
     try{
+      const chapterKinds=["rewrite","body","continue","bodyRewrite","selection","memory"];
+      const proposalTarget=proposal.target&&chapterKinds.includes(proposal.kind)?await ensureChapter(proposal.target):undefined;
       if(["rewrite","body","continue","bodyRewrite","selection","memory"].includes(proposal.kind))await post("snapshotProject",{projectId,reason:"采用 AI 草稿前"});
       if(proposal.kind==="rewrite"&&proposal.target&&proposal.chapters?.[0]){
         if(!await persistChapter(proposal.target,proposal.chapters[0]))return;
       }else if(proposal.kind==="body"&&proposal.target&&proposal.text){
-        if(chapters.find(c=>c.id===proposal.target)?.body&&!window.confirm("生成正文将覆盖这一章现有正文。已创建可恢复版本，确定采用吗？"))return;
+        if(proposalTarget?.body&&!window.confirm("生成正文将覆盖这一章现有正文。已创建可恢复版本，确定采用吗？"))return;
         if(!await persistChapter(proposal.target,{body:proposal.text,body_outline_revision:-1}))return;setMode("body");
       }else if((proposal.kind==="continue"||proposal.kind==="bodyRewrite")&&proposal.target&&proposal.text){
-        const target=chapters.find(c=>c.id===proposal.target);
+        const target=proposalTarget;
         if(!target||target.body!==proposal.baseBody)throw new Error("正文已变化，请重新生成草稿");
         const offset=proposal.insertionOffset??target.body.length;
         const next=proposal.kind==="continue"?target.body.slice(0,offset)+proposal.text+target.body.slice(offset):proposal.text;
@@ -307,7 +401,7 @@ export default function Home() {
       }else if(proposal.kind==="memory"&&proposal.target&&proposal.text){
         if(!await persistChapter(proposal.target,{memory:proposal.text}))return;
       }else if(proposal.kind==="selection"&&proposal.target&&proposal.text){
-        const target=chapters.find(c=>c.id===proposal.target);
+        const target=proposalTarget;
         if(!target||target.body.slice(selectionStart,selectionEnd)!==proposal.selection)throw new Error("正文已变化，请重新选择片段");
         if(!await persistChapter(target.id,{body:target.body.slice(0,selectionStart)+proposal.text+target.body.slice(selectionEnd)}))return;
       }else if(proposal.chapters?.length){
@@ -316,21 +410,30 @@ export default function Home() {
         }
         if(!await flushAllChapters())return;
         const result=await post(proposal.kind==="append"?"appendOutline":proposal.kind==="insert"?"insertOutline":"replaceOutline",{projectId,chapters:proposal.chapters,afterChapterId:proposal.afterChapterId||""});
-        await load();if(result.id)setChapterId(result.id);
+        await load();if(result.id){setChapterId(result.id);setReadingChapterId(result.id);setMode("outline");setReaderJump({id:result.id,token:Date.now(),mode:"outline"});setView("read");}
       }
+      if(proposal.target&&chapterKinds.includes(proposal.kind)){setChapterId(proposal.target);setReadingChapterId(proposal.target);setReaderJump({id:proposal.target,token:Date.now(),mode:["body","continue","bodyRewrite","selection"].includes(proposal.kind)?"body":mode});}
       setProposal(null);toast.success("已采用生成结果");
     }catch(e){toast.error(e instanceof Error?e.message:"采用失败，请检查章节列表");await load();}
     finally{setBusy(false);}
   }
-  function exportBook(){
-    if(!project)return;
-    const content=`# ${project.title}\n\n## 小说概要\n\n${project.summary||""}\n\n## 故事资料\n\n${project.story_bible||""}\n\n`+chapters.map((c,i)=>`## 第${i+1}章 ${c.title}\n\n> ${c.synopsis}\n\n${c.body||""}\n`).join("\n");
-    const blob=new Blob([content],{type:"text/markdown;charset=utf-8"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`${project.title.replace(/[\\/:*?"<>|]/g,"_")}.md`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  async function exportBook(){
+    if(!project||exportBusy)return;setExportBusy(true);
+    try{
+      if(!await flushAllChapters())return;
+      const parts=[`# ${project.title}\n\n## 小说概要\n\n${project.summary||""}\n\n## 故事资料\n\n${project.story_bible||""}\n\n`];
+      for(let index=0;index<chapters.length;index+=3){
+        const rows=await fetchChapterBatch(project.id,chapters.slice(index,index+3).map(c=>c.id),"body");
+        rows.forEach((c,i)=>parts.push(`## 第${index+i+1}章 ${c.title}\n\n> ${c.synopsis}\n\n${c.body||""}\n\n`));
+      }
+      const blob=new Blob(parts,{type:"text/markdown;charset=utf-8"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`${project.title.replace(/[\\/:*?"<>|]/g,"_")}.md`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    }catch(error){toast.error(error instanceof Error?error.message:"导出失败，请刷新目录后重试");}
+    finally{setExportBusy(false);}
   }
   useEffect(()=>{
     const context=(document as Document & {modelContext?:{registerTool:(tool:unknown,options:{signal:AbortSignal})=>Promise<void>|void}}).modelContext;
     if(!context?.registerTool)return;const lifecycle=new AbortController();
-    void Promise.resolve(context.registerTool({name:"read_novel_workspace",title:"读取小说工作台",description:"读取当前作品、章节标题和概述",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute:()=>({project:project?.title||null,chapters:chapters.map(c=>({id:c.id,title:c.title,synopsis:c.synopsis}))})},{signal:lifecycle.signal})).catch(()=>{});
+    void Promise.resolve(context.registerTool({name:"read_novel_workspace",title:"读取小说工作台",description:"读取当前作品、章节标题和概述",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute:async()=>{const rows:Chapter[]=[];for(let at=0;at<chapters.length;at+=20)rows.push(...await fetchChapterBatch(projectId,chapters.slice(at,at+20).map(c=>c.id),"outline"));return {project:project?.title||null,chapters:rows.map(c=>({id:c.id,title:c.title,synopsis:c.synopsis}))};}},{signal:lifecycle.signal})).catch(()=>{});
     if(projectId) void Promise.resolve(context.registerTool({name:"add_novel_chapter",title:"添加小说章节",description:"为当前作品添加一个带标题和概述的章节，并在工作台显示",inputSchema:{type:"object",properties:{title:{type:"string"},synopsis:{type:"string"}},required:["title","synopsis"],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input:unknown)=>{const value=input as {title?:unknown;synopsis?:unknown};if(typeof value?.title!=="string"||!value.title.trim()||typeof value?.synopsis!=="string")throw new Error("请提供章节标题和概述");const result=await post("addChapter",{projectId,title:value.title.slice(0,180),synopsis:value.synopsis.slice(0,15000)});await load();setChapterId(result.id);return {id:result.id,title:value.title};}},{signal:lifecycle.signal})).catch(()=>{});
     return ()=>lifecycle.abort();
   },[project?.title,chapters.length,projectId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -343,7 +446,7 @@ export default function Home() {
         <div className="field"><Label htmlFor="new-bible">故事资料（可选）</Label><Textarea id="new-bible" className="story-bible-editor" rows={12} value={draftStoryBible} onSelect={e=>{const el=e.currentTarget;setBibleSelection({start:el.selectionStart,end:el.selectionEnd,text:el.value.slice(el.selectionStart,el.selectionEnd)});}} onChange={e=>{setDraftStoryBible(e.target.value);setBibleSelection({start:0,end:0,text:""});}} placeholder="用 # 主线、# 人物等标签自由记录故事设定……"/></div>
         {!draftStoryBible.trim()&&<Button variant="outline" size="sm" onClick={()=>setDraftStoryBible(storyTemplate)}>插入默认模板</Button>}{projectFieldActions("story_bible",true)}
         <div className="dialog-actions"><Button onClick={()=>void createProject()}>创建作品</Button></div></DialogContent></Dialog></div>
-      <div className="top-actions"><span className="save-state">{saveError?"保存失败 · 草稿已暂存":projectDirty?"设定待保存":saving?"保存中…":Object.keys(pendingPatch.current).length?"待保存":"已保存"}</span>{saveError&&<Button variant="outline" size="sm" onClick={async()=>{for(const id of Object.keys(pendingPatch.current))await flushChapter(id);if(projectDirty&&project)await saveProject(project);}}>重试保存</Button>}<Button variant="ghost" size="sm" onClick={exportBook} disabled={!project}><Download size={16}/> 导出</Button>
+      <div className="top-actions"><span className="save-state">{saveError?"保存失败 · 草稿已暂存":projectDirty?"设定待保存":saving?"保存中…":Object.keys(pendingPatch.current).length?"待保存":"已保存"}</span>{saveError&&<Button variant="outline" size="sm" onClick={async()=>{for(const id of Object.keys(pendingPatch.current))await flushChapter(id);if(projectDirty&&project)await saveProject(project);}}>重试保存</Button>}<Button variant="ghost" size="sm" onClick={()=>void exportBook()} disabled={!project||exportBusy}><Download size={16}/> {exportBusy?"导出中…":"导出"}</Button>
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}><Button variant="outline" size="sm" onClick={()=>setSettingsOpen(true)}><Settings2 size={16}/> 模型配置</Button><DialogContent className="settings-dialog"><DialogHeader><DialogTitle>自定义模型</DialogTitle></DialogHeader><p className="dialog-note">已配置 DeepSeek 默认模型。切换到其他兼容接口时，可在下方填写地址、模型和密钥；自定义密钥只在当前页面使用。</p><div className="field"><Label htmlFor="endpoint">接口地址</Label><Input id="endpoint" placeholder="https://example.com/v1/chat/completions" value={model.endpoint} onChange={e=>setModel({...model,endpoint:e.target.value})}/></div><div className="field"><Label htmlFor="model">模型名称</Label><Input id="model" placeholder="填写服务商提供的模型 ID" value={model.model} onChange={e=>setModel({...model,model:e.target.value})}/></div><div className="field"><Label htmlFor="key">API 密钥</Label><Input id="key" type="password" autoComplete="off" placeholder="默认 DeepSeek 留空；自定义模型请填写" value={model.key} onChange={e=>setModel({...model,key:e.target.value})}/></div><div className="field"><Label htmlFor="temp">创造性 · {model.temperature.toFixed(1)}</Label><input id="temp" type="range" min="0" max="1.5" step="0.1" value={model.temperature} onChange={e=>setModel({...model,temperature:Number(e.target.value)})}/></div><div className="dialog-actions"><Button variant="outline" onClick={()=>void generate("test")} disabled={busy||!project}>测试连接</Button><Button onClick={()=>setSettingsOpen(false)}>完成</Button></div></DialogContent></Dialog>
       </div></header>
     <Dialog open={showHistory} onOpenChange={setShowHistory}><DialogContent className="settings-dialog"><DialogHeader><DialogTitle>版本与生成草稿</DialogTitle></DialogHeader>
@@ -366,10 +469,10 @@ export default function Home() {
       {project&&mobileAssistantOpen&&<button className="assistant-scrim" aria-label="关闭创作助手" onClick={()=>setMobileAssistantOpen(false)}/>}
       <aside className={`sidebar ${sidebar?"":"sidebar-closed"}`}><div className="sidebar-head"><span className="eyebrow">章节目录 <b>{chapters.length}</b></span>{project&&<button className="icon-button" aria-label="添加章节" title="添加章节" disabled={false||addingChapter} onClick={()=>void addChapter()}><Plus size={17}/></button>}</div>
 
-        {project&&<><div className="chapter-list">{chapters.map((c,i)=><button key={c.id} className={`chapter-item ${c.id===chapterId?"selected":""}`} onClick={async()=>{if(busy||fieldBusy){toast("请先停止当前生成");return;}if(chapterId&&!await flushChapter(chapterId))return;setChapterId(c.id);setProposal(null);setSelection("");if(window.matchMedia("(max-width: 850px)").matches)setSidebar(false);}}><span className="chapter-number">{String(i+1).padStart(2,"0")}</span><span className="chapter-name">{c.title}</span>{c.body&&<span className="written-dot" title="已有正文"/>}</button>)}{!chapters.length&&<p className="side-empty">生成大纲或手动添加章节</p>}</div><button className="sidebar-add" disabled={false||addingChapter} onClick={()=>void addChapter()}><Plus size={16}/> 添加章节</button></>}{!project&&!loading&&<p className="side-empty">从顶部选择或新建作品</p>}
+        {project&&<><div ref={directory} className="chapter-list">{chapters.map((c,i)=><button key={c.id} className={`chapter-item ${c.id===(view==="read"?readingChapterId:chapterId)?"selected":""}`} onClick={()=>{if(view==="read"){setReaderJump({id:c.id,token:Date.now(),mode});selectReaderChapter(c.id);}else void editChapter(c.id);if(window.matchMedia("(max-width: 850px)").matches)setSidebar(false);}}><span className="chapter-number">{String(i+1).padStart(2,"0")}</span><span className="chapter-name">{c.title}</span>{hasBody(c)&&<span className="written-dot" title="已有正文"/>}</button>)}{!chapters.length&&<p className="side-empty">生成大纲或手动添加章节</p>}</div><button className="sidebar-add" disabled={false||addingChapter} onClick={()=>void addChapter()}><Plus size={16}/> 添加章节</button></>}{!project&&!loading&&<p className="side-empty">从顶部选择或新建作品</p>}
         <div className="sidebar-bottom"><span>让故事从一页开始。</span></div>
       </aside>
-      <main className="main-area"><div className="main-top"><button className="icon-button sidebar-toggle" title="展开或收起目录" aria-label="展开或收起目录" aria-expanded={sidebar} onClick={()=>setSidebar(!sidebar)}>{sidebar?<PanelLeftClose size={18}/>:<PanelLeftOpen size={18}/>}</button><div className="breadcrumb">{project?.title||"新作品"}<span>/</span>{chapter?chapter.title:"大纲"}</div>{project&&<><Button variant="ghost" size="sm" onClick={()=>setShowHistory(true)}>版本</Button></>}{project&&<Dialog open={storyOpen} onOpenChange={async open=>{if(!open&&projectDirty){if(!await saveProject(project||{}))return;}setStoryOpen(open);}}><Button variant="ghost" size="sm" onClick={()=>{setStoryOpen(true);}}>作品设定 <ArrowRight size={14}/></Button><DialogContent className="settings-dialog character-dialog"><DialogHeader><DialogTitle>作品设定</DialogTitle></DialogHeader>
+      <main className={`main-area ${view==="read"?"reading-mode":""}`}><div className="main-top"><button className="icon-button sidebar-toggle" title="展开或收起目录" aria-label="展开或收起目录" aria-expanded={sidebar} onClick={()=>setSidebar(!sidebar)}>{sidebar?<PanelLeftClose size={18}/>:<PanelLeftOpen size={18}/>}</button><div className="breadcrumb">{project?.title||"新作品"}<span>/</span>{(view==="read"?readingChapter:chapter)?.title||"大纲"}</div>{project&&<><Button variant="ghost" size="sm" onClick={()=>setShowHistory(true)}>版本</Button></>}{project&&<Dialog open={storyOpen} onOpenChange={async open=>{if(!open&&projectDirty){if(!await saveProject(project||{}))return;}setStoryOpen(open);}}><Button variant="ghost" size="sm" onClick={()=>{setStoryOpen(true);}}>作品设定 <ArrowRight size={14}/></Button><DialogContent className="settings-dialog character-dialog"><DialogHeader><DialogTitle>作品设定</DialogTitle></DialogHeader>
         <div className="field"><Label htmlFor="story-title">书名</Label><Input id="story-title" value={project.title} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,title:e.target.value}:p));}}/></div>
         <div className="field"><Label htmlFor="story-genre">题材</Label><Input id="story-genre" value={project.genre} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,genre:e.target.value}:p));}} placeholder="悬疑、科幻、奇幻……"/></div>
         <div className="field"><Label htmlFor="story-summary">小说概要</Label><Textarea id="story-summary" rows={4} value={project.summary} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,summary:e.target.value}:p));}} placeholder="概括故事主线、人物和吸引读者的悬念……"/></div>{projectFieldActions("summary")}
@@ -384,13 +487,13 @@ export default function Home() {
         {reviewText&&<div className="field-preview"><strong>冲突检查建议</strong><p>{reviewText}</p><Button size="sm" variant="outline" onClick={()=>setReviewText("")}>关闭</Button></div>}
         <div className="dialog-actions"><Button variant="destructive" onClick={async()=>{if(!window.confirm("将整部作品移出工作台？作品、章节和正文会保留；恢复入口稍后提供。"))return;if(!await flushAllChapters())return;if(projectDirty&&!await saveProject(project))return;await post("deleteProject",{id:project.id});setStoryOpen(false);setProjectId("");await load();}}>删除作品</Button><Button onClick={async()=>{if(await saveProject(project))setStoryOpen(false);}}>保存设定</Button></div></DialogContent></Dialog>}{project&&<Button className="mobile-assistant-toggle" variant="outline" size="sm" aria-expanded={mobileAssistantOpen} onClick={()=>{setSidebar(false);setMobileAssistantOpen(true);}}><Sparkles size={16}/> AI 助手</Button>}</div>
         {!project? <section className="welcome"><div className="welcome-icon"><BookOpen size={32}/></div><div className="eyebrow">新的故事</div><h1>从一个念头，写到最后一章。</h1><p>先创建作品，写下故事设定。你可以生成大纲，也可以从空白章节开始。</p><Button onClick={()=>setNewOpen(true)}><Plus size={17}/> 新建小说</Button></section>:
-        <><div className="editor-heading"><div><span className="eyebrow">{chapter?`第 ${chapters.findIndex(c=>c.id===chapter.id)+1} 章`:"故事蓝图"}</span><h1>{chapter?.title||project.title}</h1></div><Tabs value={mode} onValueChange={value=>{setMode(value as "outline"|"body");setProposal(null);}}><TabsList><TabsTrigger value="outline"><FileText size={16}/> 大纲</TabsTrigger><TabsTrigger value="body"><PenLine size={16}/> 正文</TabsTrigger></TabsList></Tabs></div>
-        <div className="editor-scroll"><div className="editor-paper">{chapter?<>{mode==="outline"?<><div className="editor-label">章节标题</div><input className="title-input" aria-label="章节标题" value={chapter.title} onChange={e=>updateChapter(chapter.id,{title:e.target.value})} placeholder="输入章节标题"/><div className="editor-label synopsis-label">章节概述</div><textarea className="synopsis-editor" aria-label="章节概述" value={chapter.synopsis} onChange={e=>updateChapter(chapter.id,{synopsis:e.target.value})} placeholder="这一章发生什么？人物想要什么，又遇到什么阻碍？"/><div className="chapter-controls"><Button variant="ghost" size="sm" onClick={()=>void moveChapter(-1)} disabled={false||chapters.indexOf(chapter)===0}><ChevronUp size={15}/> 上移</Button><Button variant="ghost" size="sm" onClick={()=>void moveChapter(1)} disabled={false||chapters.indexOf(chapter)===chapters.length-1}><ChevronDown size={15}/> 下移</Button><Button variant="ghost" size="sm" onClick={()=>void deleteChapter()}><Trash2 size={15}/> 删除章节</Button></div></>:<><div className="body-synopsis"><span>本章概述</span><p>{chapter.synopsis||"先在大纲中写下本章概述，生成正文会更准确。"}</p></div>{chapter.body&&chapter.body_outline_revision!==null&&chapter.body_outline_revision<chapter.outline_revision&&<div className="stale-note">大纲已修改，请检查正文是否仍与当前概述一致。</div>}{!!chapter.continuity_review&&<div className="stale-note">故事设定或相邻大纲已变化，请复核本章承接、人物与时间线。<Button size="sm" variant="outline" onClick={async()=>{await post("markReviewed",{id:chapter.id});await load();}}>已复核</Button></div>}<textarea onSelect={e=>{const area=e.currentTarget;setSelectionStart(area.selectionStart);setSelectionEnd(area.selectionEnd);setBodyCursor(area.selectionEnd);setSelection(area.value.slice(area.selectionStart,area.selectionEnd));}} className="body-editor" aria-label="章节正文" value={chapter.body} onChange={e=>updateChapter(chapter.id,{body:e.target.value})} placeholder="在这里写作，或打开 AI 助手生成本章正文……"/><div className="revision-tools"><span>{selection?`已选 ${selection.length} 字`:"选中正文片段后可局部修订"}</span>{(["expand","rewrite","shorten","polish"] as const).map(op=><Button key={op} size="sm" variant="outline" disabled={!selection||busy||false} onClick={()=>{selectionOperation.current=op;void generate("selection");}}>{({expand:"扩写",rewrite:"重写",shorten:"缩写",polish:"润色"})[op]}</Button>)}</div><div className="memory-box"><Label htmlFor="chapter-memory">本章事实记忆 · 后续章节会引用</Label><Textarea id="chapter-memory" rows={3} value={chapter.memory||""} onChange={e=>updateChapter(chapter.id,{memory:e.target.value})} placeholder="本章发生了什么，哪些伏笔尚未回收？"/><Button variant="outline" size="sm" disabled={!chapter.body||busy||false} onClick={()=>void generate("memory")}>AI 整理本章记忆</Button></div></>}</>:<div className="outline-empty"><div className="empty-ornament"><Sparkles size={26}/></div><h2>故事，从大纲开始</h2><p>在 AI 助手中设置章节数并生成整部大纲，或手动添加第一章。</p><Button variant="outline" disabled={false||addingChapter} onClick={()=>void addChapter()}><Plus size={16}/> 手动添加章节</Button></div>}</div></div></>}
+        <><div className="editor-heading"><div><span className="eyebrow">{view==="read"?"连续浏览":chapter?`第 ${chapters.findIndex(c=>c.id===chapter.id)+1} 章`:"故事蓝图"}</span><h1>{(view==="read"?readingChapter:chapter)?.title||project.title}</h1></div><Tabs value={mode} onValueChange={async value=>{if(!await flushAllChapters())return;setMode(value as "outline"|"body");setReaderJump(null);setSelection("");}}><TabsList><TabsTrigger value="outline" disabled={busy||!!fieldBusy}><FileText size={16}/> 大纲</TabsTrigger><TabsTrigger value="body" disabled={busy||!!fieldBusy}><PenLine size={16}/> 正文</TabsTrigger></TabsList></Tabs></div><div className="reading-toolbar" role="group" aria-label="浏览或编辑"><Button variant={view==="read"?"secondary":"ghost"} size="sm" aria-pressed={view==="read"} onClick={()=>void readChapters()}>连续浏览</Button><Button variant={view==="edit"?"secondary":"ghost"} size="sm" aria-pressed={view==="edit"} disabled={!chapters.length||busy||!!fieldBusy} onClick={()=>void editChapter(readingChapterId||chapterId||chapters[0]?.id)}>单章编辑</Button>{view==="edit"&&<span>自动保存 · 返回浏览会恢复阅读位置</span>}</div>
+        {view==="read"&&chapters.length>0?<ContinuousReader key={`${project.id}:${mode}`} projectId={project.id} chapters={chapters} mode={mode} initialChapterId={chapterId} jump={readerJump} busy={busy||!!fieldBusy||reviewBusy} onRead={selectReaderChapter} onEdit={id=>void editChapter(id)} onAI={readerAI} onRefresh={()=>void load()}/>:chapter&&!chapter.body_loaded?<div className="editor-scroll editor-loading" role="status"><p>{detailError||"正在加载章节…"}</p>{detailError&&<Button variant="outline" disabled={detailBusy} onClick={()=>void editChapter(chapter.id)}>重新加载</Button>}</div>:<div className="editor-scroll"><div className="editor-paper">{chapter?<>{mode==="outline"?<><div className="editor-label">章节标题</div><input className="title-input" aria-label="章节标题" disabled={busy||!!fieldBusy} value={chapter.title} onChange={e=>updateChapter(chapter.id,{title:e.target.value})} placeholder="输入章节标题"/><div className="editor-label synopsis-label">章节概述</div><textarea className="synopsis-editor" aria-label="章节概述" disabled={busy||!!fieldBusy} value={chapter.synopsis} onChange={e=>updateChapter(chapter.id,{synopsis:e.target.value})} placeholder="这一章发生什么？人物想要什么，又遇到什么阻碍？"/><div className="chapter-controls"><Button variant="ghost" size="sm" onClick={()=>void moveChapter(-1)} disabled={false||chapters.indexOf(chapter)===0}><ChevronUp size={15}/> 上移</Button><Button variant="ghost" size="sm" onClick={()=>void moveChapter(1)} disabled={false||chapters.indexOf(chapter)===chapters.length-1}><ChevronDown size={15}/> 下移</Button><Button variant="ghost" size="sm" onClick={()=>void deleteChapter()}><Trash2 size={15}/> 删除章节</Button></div></>:<><div className="body-synopsis"><span>本章概述</span><p>{chapter.synopsis||"先在大纲中写下本章概述，生成正文会更准确。"}</p></div>{chapter.body&&chapter.body_outline_revision!==null&&chapter.body_outline_revision<chapter.outline_revision&&<div className="stale-note">大纲已修改，请检查正文是否仍与当前概述一致。</div>}{!!chapter.continuity_review&&<div className="stale-note">故事设定或相邻大纲已变化，请复核本章承接、人物与时间线。<Button size="sm" variant="outline" onClick={async()=>{await post("markReviewed",{id:chapter.id});await load();}}>已复核</Button></div>}<textarea onSelect={e=>{const area=e.currentTarget;setSelectionStart(area.selectionStart);setSelectionEnd(area.selectionEnd);setBodyCursor(area.selectionEnd);setSelection(area.value.slice(area.selectionStart,area.selectionEnd));}} className="body-editor" aria-label="章节正文" disabled={busy||!!fieldBusy} value={chapter.body} onChange={e=>updateChapter(chapter.id,{body:e.target.value})} placeholder="在这里写作，或打开 AI 助手生成本章正文……"/><div className="revision-tools"><span>{selection?`已选 ${selection.length} 字`:"选中正文片段后可局部修订"}</span>{(["expand","rewrite","shorten","polish"] as const).map(op=><Button key={op} size="sm" variant="outline" disabled={!selection||busy||false} onClick={()=>{selectionOperation.current=op;void generate("selection");}}>{({expand:"扩写",rewrite:"重写",shorten:"缩写",polish:"润色"})[op]}</Button>)}</div><div className="memory-box"><Label htmlFor="chapter-memory">本章事实记忆 · 后续章节会引用</Label><Textarea id="chapter-memory" rows={3} disabled={busy||!!fieldBusy} value={chapter.memory||""} onChange={e=>updateChapter(chapter.id,{memory:e.target.value})} placeholder="本章发生了什么，哪些伏笔尚未回收？"/><Button variant="outline" size="sm" disabled={!chapter.body||busy||false} onClick={()=>void generate("memory")}>AI 整理本章记忆</Button></div></>}</>:<div className="outline-empty"><div className="empty-ornament"><Sparkles size={26}/></div><h2>故事，从大纲开始</h2><p>在 AI 助手中设置章节数并生成整部大纲，或手动添加第一章。</p><Button variant="outline" disabled={false||addingChapter} onClick={()=>void addChapter()}><Plus size={16}/> 手动添加章节</Button></div>}</div></div>}</>}
       </main>
-      {project&&<aside className={`assistant-panel ${mobileAssistantOpen?"mobile-open":""}`} aria-label="创作助手"><div className="assistant-head"><div className="assistant-symbol"><Sparkles size={17}/></div><span>创作助手</span><button className="icon-button assistant-close" aria-label="关闭创作助手" onClick={()=>setMobileAssistantOpen(false)}><X size={18}/></button></div><div className="assistant-content"><div className="helper-title">{mode==="outline"?"让故事继续生长":"写下这一章"}</div><p className="helper-description">{mode==="outline"?"会参考小说概要与故事资料。生成内容会先展示，确认后才保存。":"会参考小说概要、故事资料、章节概述与前文。你可以先调整写作要求。"}</p><div className="field"><Label htmlFor="instruction">补充要求</Label><Textarea id="instruction" rows={5} placeholder={mode==="outline"?"例如：前三章增加悬念；加强女主的主动性……":"例如：突出雨夜的压迫感，多写人物之间的对话……"} value={instruction} onChange={e=>setInstruction(e.target.value)}/></div>{mode==="outline"&&<div className="field"><Label htmlFor="count">生成章节数</Label><Input id="count" type="number" min={1} max={30} value={count} onChange={e=>setCount(Number(e.target.value))}/></div>}
+      {project&&<aside className={`assistant-panel ${mobileAssistantOpen?"mobile-open":""}`} aria-label="创作助手"><div className="assistant-head"><div className="assistant-symbol"><Sparkles size={17}/></div><span>创作助手</span><button className="icon-button assistant-close" aria-label="关闭创作助手" onClick={()=>setMobileAssistantOpen(false)}><X size={18}/></button></div><div className="assistant-content"><div className="helper-title">{mode==="outline"?"让故事继续生长":"写下这一章"}</div><p className="assistant-target">AI 目标 · {["outline","append"].includes(generationKind||proposal?.kind||"")?"全书":chapters.find(c=>c.id===(proposal?.target||chapterId))?.title||"全书"}{(busy||proposal)&&<small>本次目标已固定，滚动浏览不会改变</small>}</p><p className="helper-description">{mode==="outline"?"会参考小说概要与故事资料。生成内容会先展示，确认后才保存。":"会参考小说概要、故事资料、章节概述与前文。你可以先调整写作要求。"}</p><div className="field"><Label htmlFor="instruction">补充要求</Label><Textarea id="instruction" rows={5} placeholder={mode==="outline"?"例如：前三章增加悬念；加强女主的主动性……":"例如：突出雨夜的压迫感，多写人物之间的对话……"} value={instruction} onChange={e=>setInstruction(e.target.value)}/></div>{mode==="outline"&&<div className="field"><Label htmlFor="count">生成章节数</Label><Input id="count" type="number" min={1} max={30} value={count} onChange={e=>setCount(Number(e.target.value))}/></div>}
           {mode==="outline"&&<div className="field"><Label htmlFor="insert-after">AI 插入位置</Label><select id="insert-after" value={insertAfterId} onChange={e=>setInsertAfterId(e.target.value)}><option value="__start__">全书最前面</option>{chapters.map((c,i)=><option key={c.id} value={c.id}>第 {i+1} 章《{c.title}》之后</option>)}</select><p className="model-hint">插入只新增章节，已有正文保留；相邻正文会提示复核。</p></div>}
           <div className="generate-actions">{mode==="outline"?<><Button className="primary-action" disabled={busy||false} onClick={()=>void generate("outline")}><Sparkles size={16}/>{busy?"生成中…":"生成全书大纲"}</Button><div className="action-grid"><Button variant="outline" disabled={busy||!chapter||false} onClick={()=>void generate("rewrite")}><RefreshCw size={15}/> 重写本章</Button><Button variant="outline" disabled={busy||!chapters.length||false} onClick={()=>void generate("append")}><Plus size={15}/> 追加大纲</Button><Button variant="outline" disabled={busy||false} onClick={()=>void generate("insert")}><Plus size={15}/> AI 插入大纲</Button></div></>:<><Button className="primary-action" disabled={busy||!chapter||false} onClick={()=>void generate("body")}><Sparkles size={16}/>{busy?"生成中…":"生成本章正文"}</Button><div className="action-grid"><Button variant="outline" disabled={busy||!chapter?.body||false} onClick={()=>void generate("continue")}>从光标处续写</Button><Button variant="outline" disabled={busy||!chapter?.body||false} onClick={()=>void generate("bodyRewrite")}>重写整章正文</Button></div><p className="model-hint">将光标放在正文中指定位置；未放置时从章末续写。</p></>}</div><p className="model-hint">{model.model?`当前模型 · ${model.model}`:"尚未配置模型"} <button onClick={()=>setSettingsOpen(true)}>设置</button></p>
-          <p className="model-hint">默认模型每日最多 10 次／工作区、全站 30 次。本次约携带 {Math.ceil(((project.summary||"").length+(project.story_bible||"").length+chapters.reduce((n,c)=>n+c.synopsis.length,0))/1000)} 千字设定与大纲，长篇生成可能另有正文上下文。</p>
+          <p className="model-hint">默认模型每日最多 10 次／工作区、全站 30 次。AI 会从当前作品读取所需大纲、事实记忆与前文；滚动预加载只读取已保存内容，不调用模型。</p>
           {busy&&<section className="proposal"><div className="proposal-head"><span>AI 正在输出</span><button className="icon-button" onClick={stopGeneration} aria-label="停止生成"><X size={16}/></button></div><div className="proposal-scroll" ref={streamBox} onScroll={e=>{const el=e.currentTarget;followStream.current=el.scrollHeight-el.scrollTop-el.clientHeight<48;}}><p className={skipAnimation?"proposal-body":"proposal-body typing-output"} aria-live="polite">{streaming||"正在连接模型…"}</p></div><div className="proposal-buttons"><Button variant="outline" size="sm" onClick={()=>setSkipAnimation(!skipAnimation)}>{skipAnimation?"启用动画":"关闭动画"}</Button><Button variant="outline" size="sm" onClick={stopGeneration}>停止生成</Button></div></section>}
           {proposal&&<section className="proposal"><div className="proposal-head"><span>生成草稿</span><button className="icon-button" onClick={()=>setProposal(null)} aria-label="关闭草稿"><X size={16}/></button></div><div className="proposal-scroll">{proposal.kind==="insert"&&<div className="revision-before">插入在：{proposal.afterChapterId?`《${chapters.find(c=>c.id===proposal.afterChapterId)?.title||"已删除章节"}》之后`:"全书最前面"}</div>}{proposal.kind==="continue"&&<div className="revision-before">在正文第 {proposal.insertionOffset??proposal.baseBody?.length??0} 字处续写</div>}{proposal.kind==="bodyRewrite"&&<div className="revision-before"><strong>当前正文</strong><p>{proposal.baseBody}</p><strong>重写稿</strong></div>}{proposal.kind==="selection"&&proposal.selection&&<div className="revision-before"><strong>原文</strong><p>{proposal.selection}</p><strong>修订稿</strong></div>}{proposal.chapters?.map((c,i)=><div className="proposal-chapter" key={i}><strong>{c.title}</strong><p>{c.synopsis}</p></div>)}{proposal.text&&<p className="proposal-body">{proposal.text}</p>}</div><div className="proposal-buttons"><Button variant="outline" size="sm" onClick={()=>setProposal(null)}>舍弃</Button><Button size="sm" disabled={busy||(["outline","append","insert","rewrite"].includes(proposal.kind)&&!proposal.chapters?.length)||(["body","continue","bodyRewrite","selection","memory"].includes(proposal.kind)&&!proposal.text)} onClick={()=>void acceptProposal()}><Check size={15}/> 采用内容</Button></div></section>}
         </div><div className="assistant-footer"><span className="footer-line"/>你的文字始终由你决定。</div></aside>}

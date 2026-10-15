@@ -37,12 +37,32 @@ export async function POST(request:Request) {
     const session=workspaceSession(request);
     if(session.fresh)return error("请刷新页面以建立工作区会话",401);
     const kind = input.kind;
-    const chapters = Array.isArray(input.chapters) ? input.chapters.slice(0,150) : [];
-    const outline = chapters.map((c,i)=>`第${i+1}章 ${c.title}：${c.synopsis}`).join("\n").slice(0,30000);
+    let chapters: Chapter[] = Array.isArray(input.chapters) ? input.chapters.slice(0,150) : [];
     if(input.projectId){
-      const active=await env.DB?.prepare("SELECT id FROM projects WHERE id=? AND workspace_id=? AND deleted_at IS NULL").bind(input.projectId,session.id).first();
+      const database=env.DB;
+      if(!database)return error("数据库暂不可用",503);
+      const active=await database.prepare("SELECT id FROM projects WHERE id=? AND workspace_id=? AND deleted_at IS NULL").bind(input.projectId,session.id).first();
       if(!active)return error("作品不存在或已删除",403);
+      // Reading pages are lazy. Build AI context from the authorized database,
+      // independently of which chapters happen to be loaded in the browser.
+      const rows = await database.prepare("SELECT id,title,synopsis,memory,position FROM chapters WHERE project_id=? AND deleted_at IS NULL ORDER BY position,id").bind(input.projectId).all<Chapter & { memory: string; position: number }>();
+      chapters = rows.results;
+      if (input.selected?.id) {
+        const selected = await database.prepare("SELECT id,title,synopsis,body FROM chapters WHERE id=? AND project_id=? AND deleted_at IS NULL").bind(input.selected.id,input.projectId).first<Chapter>();
+        if (!selected) return error("目标章节不存在或已删除",404);
+        input.selected = selected;
+        if (kind === "body") {
+          const at = chapters.findIndex(c => c.id === selected.id);
+          const previousIds = chapters.slice(Math.max(0,at-3),at).map(c=>c.id!);
+          if (previousIds.length) {
+            const previous = await database.prepare(`SELECT id,SUBSTR(body,-1400) AS body FROM chapters WHERE project_id=? AND deleted_at IS NULL AND id IN (${previousIds.map(()=>"?").join(",")})`).bind(input.projectId,...previousIds).all<{id:string;body:string}>();
+            const endings = new Map(previous.results.map(c=>[c.id,c.body]));
+            chapters = chapters.map(c=>({...c,body:endings.get(c.id!)||""}));
+          }
+        }
+      }
     }
+    const outline = chapters.map((c,i)=>`第${i+1}章 ${c.title}：${c.synopsis}`).join("\n").slice(0,30000);
     const context = `书名：${String(input.title||"").slice(0,120)}\n题材：${String(input.genre||"").slice(0,200)}\n小说概要：${String(input.summary||"").slice(0,8000)}\n文风：${String(input.style||"").slice(0,2000)}\n故事资料（作者自定标签；尚未揭露的秘密只在章节大纲明确要求时写出）：\n${String(input.story_bible||"").slice(0,40000)}`;
     const instruction = String(input.instruction || "").slice(0,3000);
     const count = Math.min(30,Math.max(1,Number(input.count)||8));

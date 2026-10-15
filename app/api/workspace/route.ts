@@ -34,13 +34,26 @@ function insertChapter(projectId:string,c:Row,position:number) {
 export async function GET(request:Request) {
   const session=workspaceSession(request);
   try {
+    const params = new URL(request.url).searchParams;
+    if (params.get("view") === "chapters") {
+      const projectId = params.get("projectId") || "";
+      if (!await owned(projectId, session.id)) return fail("作品不存在或已删除", 404);
+      const ids = (params.get("ids") || "").split(",").filter(Boolean);
+      const fullBody = params.get("content") === "body";
+      if (!ids.length || ids.length > (fullBody ? 3 : 20) || new Set(ids).size !== ids.length || ids.some(id => id.length > 80)) return fail("章节请求无效");
+      const columns = fullBody ? "c.*" : "c.id,c.project_id,c.position,c.title,c.synopsis,c.memory,c.continuity_review,c.outline_revision,c.body_outline_revision,c.updated_at,'' AS body";
+      const rows = await db().prepare(`SELECT ${columns},LENGTH(c.body) AS body_length FROM chapters c WHERE c.project_id=? AND c.deleted_at IS NULL AND c.id IN (${ids.map(()=>"?").join(",")})`).bind(projectId, ...ids).all<Row>();
+      const byId = new Map(rows.results.map(row => [row.id, row]));
+      if (byId.size !== ids.length) return fail("章节目录已变化，请刷新目录后重试", 409);
+      return sessionResponse({ chapters: ids.map(id => ({ ...byId.get(id), outline_loaded: true, body_loaded: fullBody })) }, session);
+    }
     const [projects,chapters,snapshots,drafts]=await Promise.all([
       db().prepare("SELECT * FROM projects WHERE workspace_id=? AND deleted_at IS NULL ORDER BY updated_at DESC").bind(session.id).all<Row>(),
-      db().prepare("SELECT c.* FROM chapters c JOIN projects p ON p.id=c.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY c.position ASC").bind(session.id).all<Row>(),
+      db().prepare("SELECT c.id,c.project_id,c.position,c.title,c.continuity_review,c.outline_revision,c.body_outline_revision,c.updated_at,LENGTH(c.body) AS body_length,'' AS body,'' AS synopsis,'' AS memory,0 AS body_loaded,0 AS outline_loaded FROM chapters c JOIN projects p ON p.id=c.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY c.position ASC,c.id ASC").bind(session.id).all<Row>(),
       db().prepare("SELECT s.id,s.project_id,s.reason,s.created_at FROM project_snapshots s JOIN projects p ON p.id=s.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY s.created_at DESC LIMIT 30").bind(session.id).all<Row>(),
       db().prepare("SELECT d.* FROM generation_drafts d JOIN projects p ON p.id=d.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY d.created_at DESC LIMIT 30").bind(session.id).all<Row>(),
     ]);
-    return sessionResponse({projects:projects.results,chapters:chapters.results,snapshots:snapshots.results,drafts:drafts.results},session);
+    return sessionResponse({projects:projects.results,chapters:chapters.results.map(c=>({...c,body_loaded:false,outline_loaded:false})),snapshots:snapshots.results,drafts:drafts.results},session);
   }catch(error){console.error("workspace read",error);return fail("项目暂时无法读取，请稍后刷新。",503);}
 }
 
