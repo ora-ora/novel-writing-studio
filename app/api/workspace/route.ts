@@ -1,3 +1,4 @@
+import { cleanAIChapterTitle } from "../../../lib/chapter-title";
 import { env } from "cloudflare:workers";
 import { sessionResponse, workspaceSession } from "./session";
 
@@ -130,7 +131,7 @@ export async function POST(request:Request) {
     }
     if(action==="replaceOutline"&&projectId&&Array.isArray(data.chapters)){
       if(!await activeProject(projectId))return fail("作品不存在",403);
-      const incoming=data.chapters.slice(0,100).map((c,i)=>({id:crypto.randomUUID(),title:str((c as Row).title,180),synopsis:str((c as Row).synopsis,15000),position:i}));
+      const incoming=data.chapters.slice(0,100).map((c,i)=>({id:crypto.randomUUID(),title:cleanAIChapterTitle((c as Row).title),synopsis:str((c as Row).synopsis,15000),position:i}));
       if(!incoming.length)return fail("大纲不能为空");
       await db().batch([await snapshot(projectId,"重建全书大纲"),db().prepare("UPDATE chapters SET deleted_at=?,updated_at=? WHERE project_id=? AND deleted_at IS NULL").bind(now(),now(),projectId),...incoming.map(c=>insertChapter(projectId,c,c.position))]);
       return Response.json({id:incoming[0].id});
@@ -138,7 +139,7 @@ export async function POST(request:Request) {
     if(action==="appendOutline"&&projectId&&Array.isArray(data.chapters)){
       if(!await activeProject(projectId))return fail("作品不存在",403);
       const count=await db().prepare("SELECT COALESCE(MAX(position),-1)+1 AS next FROM chapters WHERE project_id=? AND deleted_at IS NULL").bind(projectId).first<{next:number}>();
-      const incoming=data.chapters.slice(0,100).map((c,i)=>({id:crypto.randomUUID(),title:str((c as Row).title,180),synopsis:str((c as Row).synopsis,15000),position:(count?.next??0)+i}));
+      const incoming=data.chapters.slice(0,100).map((c,i)=>({id:crypto.randomUUID(),title:cleanAIChapterTitle((c as Row).title),synopsis:str((c as Row).synopsis,15000),position:(count?.next??0)+i}));
       if(!incoming.length)return fail("没有可追加的章节");
       await db().batch([await snapshot(projectId,"追加大纲前"),...incoming.map(c=>insertChapter(projectId,c,c.position))]);
       return Response.json({id:incoming[0].id});
@@ -150,7 +151,7 @@ export async function POST(request:Request) {
       const anchor=after?rows.results.findIndex(c=>c.id===after):-1;
       if(after&&anchor<0)return fail("插入位置已变化，请刷新后重试",409);
       const at=anchor+1;
-      const incoming=data.chapters.slice(0,30).map((c,i)=>({id:crypto.randomUUID(),title:str((c as Row).title,180),synopsis:str((c as Row).synopsis,15000),position:at+i}));
+      const incoming=data.chapters.slice(0,30).map((c,i)=>({id:crypto.randomUUID(),title:cleanAIChapterTitle((c as Row).title),synopsis:str((c as Row).synopsis,15000),position:at+i}));
       if(!incoming.length)return fail("没有可插入的章节");
       const neighbors=[rows.results[anchor],rows.results[at]].filter((c):c is {id:string;position:number;body:string}=>!!c&&!!c.body);
       await db().batch([

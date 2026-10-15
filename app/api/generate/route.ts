@@ -1,3 +1,4 @@
+import { cleanAIChapterTitle } from "../../../lib/chapter-title";
 import { mergeCreativeStyle } from "../../../lib/creative-style";
 import { env } from "cloudflare:workers";
 
@@ -20,7 +21,7 @@ function parseChapters(text:string) {
   if (start < 0 || end < start) throw new Error("模型未返回章节列表，请调整要求后重试");
   const value = JSON.parse(normalized.slice(start,end+1));
   if (!Array.isArray(value) || value.length < 1 || value.length > 100) throw new Error("模型返回的章节数量不正确");
-  return value.map((item:Record<string,unknown>)=>({title:String(item.title || "未命名章节").slice(0,180),synopsis:String(item.synopsis || "").slice(0,15000)}));
+  return value.map((item:Record<string,unknown>)=>({title:cleanAIChapterTitle(item.title),synopsis:String(item.synopsis || "").slice(0,15000)}));
 }
 export async function POST(request:Request) {
   try {
@@ -117,6 +118,7 @@ export async function POST(request:Request) {
       prompt=`将下列章节正文整理为供后续章节使用的简短事实记忆（人物状态、时间、地点、已揭示信息、未回收伏笔），最多500字，不要编造：\n${String(input.selected.body||"").slice(0,30000)}`;
     } else if (kind === "test") prompt = "只回复：连接成功";
     else return error("未知生成类型");
+    if(json)prompt += '\n章节 title 只写标题本身，不包含“第几章”等章序前缀；章序由系统按插入、追加或排序后的实际位置显示。示例：title 为“午夜警报”，不要写“第十二章 午夜警报”。';
     if(useHostedDeepSeek){
       if(!env.DB)return error("默认模型额度暂不可用",503);
       const database=env.DB;

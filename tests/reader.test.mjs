@@ -8,6 +8,7 @@ import ts from "typescript";
 import { batchAround, fetchChapterBatch, hasBody } from "../lib/chapters.ts";
 import { moveChapterId } from "../lib/chapter-order.ts";
 import { mergeCreativeStyle } from "../lib/creative-style.ts";
+import { cleanAIChapterTitle } from "../lib/chapter-title.ts";
 
 const workspace = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const anotherWorkspace = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -15,7 +16,7 @@ const root = path.resolve(import.meta.dirname, "..");
 
 // Run the actual route modules against a real SQLite schema, with an offline
 // Workers binding. No preview server, production credentials, or model calls.
-async function harness() {
+async function harness(modelText, modelStream = false) {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec("PRAGMA foreign_keys=ON");
   for (const file of (await readdir(path.join(root, "drizzle"))).filter(f => f.endsWith(".sql") && f !== "0009_shared_workspace.sql").sort()) {
@@ -55,7 +56,11 @@ async function harness() {
     fetch: async (_url, options) => {
       const payload = JSON.parse(options.body);
       const prompt = payload.messages[1].content; prompts.push(prompt);
-      return Response.json({ choices: [{ message: { content: prompt.includes("JSON 数组") ? '[{"title":"离线大纲","synopsis":"测试"}]' : "离线测试稿" } }] });
+      if (modelStream) {
+        const content = modelText ?? "离线测试稿";
+        return new Response(content.match(/.{1,12}/gs).map(delta => "data: " + JSON.stringify({ choices: [{ delta: { content: delta } }] }) + "\n\n").join("") + "data: [DONE]\n\n", { headers: { "Content-Type": "text/event-stream" } });
+      }
+      return Response.json({ choices: [{ message: { content: modelText ?? (prompt.includes("JSON 数组") ? '[{"title":"离线大纲","synopsis":"测试"}]' : "离线测试稿") } }] });
     },
   });
   const modules = new Map();
@@ -235,6 +240,52 @@ test("AI can use a shared work without cookies and preserves the existing global
     assert.equal((await h.ai(hosted, null)).status, 200);
     assert.equal((await h.ai(hosted, anotherWorkspace)).status, 429);
     assert.equal(h.database.prepare("SELECT calls FROM generation_quota WHERE day=? AND workspace_id='global'").get(day).calls, 30);
+  } finally { h.close(); }
+});
+
+test("AI chapter titles drop explicit chapter numbering and retain meaningful numbers", () => {
+  for (const title of ["第123章 午夜警报", "第十二章：午夜警报", "第１２３章 — 午夜警报", "【第一百零二章】午夜警报", "### 第两百章：午夜警报", "第1章 第2章 午夜警报"]) {
+    assert.equal(cleanAIChapterTitle(title), "午夜警报", title);
+  }
+  for (const title of ["第七次警报", "第一章的秘密", "失眠第365天", "午夜警报"]) assert.equal(cleanAIChapterTitle(title), title);
+  assert.equal(cleanAIChapterTitle("第123章"), "未命名章节");
+});
+
+test("outline AI removes chapter numbering in normal, fallback, and streaming responses", async () => {
+  const model = JSON.stringify([{ title: "第123章 午夜警报", synopsis: "原始概述" }]);
+  for (const streaming of [false, true]) {
+    const h = await harness(model, streaming);
+    try {
+      for (const kind of ["outline", "append", "insert", "rewrite"]) {
+        const response = await h.ai({ kind, afterChapterId: "c0", stream: streaming });
+        assert.equal(response.status, 200);
+        const result = streaming ? (await response.text()).split("\n\n").filter(Boolean).map(line => JSON.parse(line.slice(6))).find(item => item.done) : await response.json();
+        assert.deepEqual(result.chapters, [{ title: "午夜警报", synopsis: "原始概述" }]);
+        assert.ok(h.prompts.at(-1).includes("章序由系统"));
+      }
+    } finally { h.close(); }
+  }
+  const fallback = await harness(model);
+  try {
+    const response = await fallback.ai({ kind: "insert", afterChapterId: "c0", stream: true });
+    assert.ok((await response.text()).includes('"title":"午夜警报"'));
+  } finally { fallback.close(); }
+});
+
+test("inserting numbered AI titles cleans only incoming titles and preserves existing bodies", async () => {
+  const h = await harness();
+  try {
+    const before = h.database.prepare("SELECT id,title,synopsis,body,memory FROM chapters ORDER BY id").all();
+    const response = await h.post({ action: "insertOutline", projectId: "novel", afterChapterId: "c0", chapters: [{ title: "第999章：午夜警报", synopsis: "新的过渡情节" }] });
+    assert.equal(response.status, 200);
+    const { id } = await response.json();
+    const inserted = h.database.prepare("SELECT * FROM chapters WHERE id=?").get(id);
+    assert.equal(inserted.title, "午夜警报"); assert.equal(inserted.position, 1);
+    assert.equal(inserted.synopsis, "新的过渡情节");
+    assert.equal(h.database.prepare("SELECT position FROM chapters WHERE id='c1'").get().position, 2);
+    assert.deepEqual(h.database.prepare("SELECT id,title,synopsis,body,memory FROM chapters WHERE id<>? ORDER BY id").all(id), before);
+    assert.equal((await h.post({ action: "updateChapter", id, title: "第一章的秘密" })).status, 200);
+    assert.equal(h.database.prepare("SELECT title FROM chapters WHERE id=?").get(id).title, "第一章的秘密");
   } finally { h.close(); }
 });
 
