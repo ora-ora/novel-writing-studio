@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { moveChapterId } from "@/lib/chapter-order";
+import { mergeCreativeStyle, creativeStyleTemplate } from "@/lib/creative-style";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -19,7 +20,7 @@ type Snapshot = {id:string;project_id:string;reason:string;created_at:string};
 type SavedDraft = {id:string;project_id:string;kind:string;target_id:string|null;content:string;created_at:string};
 type ModelConfig = {endpoint:string;model:string;key:string;temperature:number};
 type Proposal = {kind:"outline"|"append"|"insert"|"rewrite"|"body"|"continue"|"bodyRewrite"|"selection"|"memory"; chapters?:{title:string;synopsis:string}[]; text?:string; target?:string; selection?:string; afterChapterId?:string; insertionOffset?:number; baseBody?:string};
-type ProjectField = "summary"|"story_bible";
+type ProjectField = "summary"|"story_bible"|"style";
 type FieldOperation = "generate"|"expand"|"rewrite";
 type FieldProposal = {field:ProjectField;text:string;draft:boolean;selectionStart?:number;selectionEnd?:number;baseText?:string};
 const storyTemplate=`# 故事主线
@@ -85,6 +86,7 @@ export default function Home() {
   const [draftTitle,setDraftTitle]=useState("");
   const [draftStoryBible,setDraftStoryBible]=useState("");
   const [draftSummary,setDraftSummary]=useState("");
+  const [draftStyle,setDraftStyle]=useState("");
   const [draftLoaded,setDraftLoaded]=useState(false);
   const [instruction,setInstruction]=useState("");
   const [count,setCount]=useState(8);
@@ -126,7 +128,7 @@ export default function Home() {
     try {
       const response=await fetch("/api/workspace?view=catalog",{cache:"no-store"});const data=await response.json() as {error?:string;projects:Project[];chapters:Chapter[];snapshots:Snapshot[];drafts:SavedDraft[]};
       if(!response.ok) throw new Error(data.error);
-      setProjects(data.projects);setAllChapters(previous=>data.chapters.map(c=>{
+      setProjects(data.projects.map(p=>({...p,genre:"",style:mergeCreativeStyle(p.genre,p.style)})));setAllChapters(previous=>data.chapters.map(c=>{
         let backup:Partial<Chapter>={};
         try{backup=JSON.parse(localStorage.getItem("novel-backup-"+c.id)||"{}") as Partial<Chapter>;}catch{}
         if(Object.keys(backup).length){pendingPatch.current[c.id]={...backup,...pendingPatch.current[c.id]};setSaveError(true);}
@@ -180,8 +182,8 @@ export default function Home() {
   },[view,chapterId]);
   useEffect(()=>{try{const saved=JSON.parse(localStorage.getItem("novel-model")||"null") as Partial<ModelConfig>|null;if(saved?.endpoint&&saved.model)setModel({...defaultModel,...saved,key:""});}catch{}},[]);
   useEffect(()=>{localStorage.setItem("novel-model",JSON.stringify({endpoint:model.endpoint,model:model.model,temperature:model.temperature}));},[model.endpoint,model.model,model.temperature]);
-  useEffect(()=>{try{const d=JSON.parse(localStorage.getItem("novel-new-draft")||"null") as {title?:string;premise?:string;summary?:string;notes?:string;story_bible?:string}|null;if(d){setDraftTitle(d.title||"");setDraftSummary(d.summary||"");setDraftStoryBible(d.story_bible||[d.premise&&`# 世界与规则\n${d.premise}`,d.notes&&`# 重要提示\n${d.notes}`].filter(Boolean).join("\n\n"));}}catch{}setDraftLoaded(true);},[]);
-  useEffect(()=>{if(draftLoaded)localStorage.setItem("novel-new-draft",JSON.stringify({title:draftTitle,summary:draftSummary,story_bible:draftStoryBible}));},[draftLoaded,draftTitle,draftSummary,draftStoryBible]);
+  useEffect(()=>{try{const d=JSON.parse(localStorage.getItem("novel-new-draft")||"null") as {title?:string;premise?:string;summary?:string;notes?:string;story_bible?:string;style?:string}|null;if(d){setDraftTitle(d.title||"");setDraftSummary(d.summary||"");setDraftStyle(d.style||"");setDraftStoryBible(d.story_bible||[d.premise&&`# 世界与规则\n${d.premise}`,d.notes&&`# 重要提示\n${d.notes}`].filter(Boolean).join("\n\n"));}}catch{}setDraftLoaded(true);},[]);
+  useEffect(()=>{if(draftLoaded)localStorage.setItem("novel-new-draft",JSON.stringify({title:draftTitle,summary:draftSummary,style:draftStyle,story_bible:draftStoryBible}));},[draftLoaded,draftTitle,draftSummary,draftStyle,draftStoryBible]);
   useEffect(()=>{try{const saved=JSON.parse(localStorage.getItem("novel-field-proposal")||"null") as FieldProposal|null;if(saved?.draft)setFieldProposal(saved);}catch{}},[]);
   useEffect(()=>{if(fieldProposal?.draft)localStorage.setItem("novel-field-proposal",JSON.stringify(fieldProposal));else localStorage.removeItem("novel-field-proposal");},[fieldProposal]);
   useEffect(()=>{if(followStream.current){if(streamBox.current)streamBox.current.scrollTop=streamBox.current.scrollHeight;if(fieldStreamBox.current)fieldStreamBox.current.scrollTop=fieldStreamBox.current.scrollHeight;}},[streaming]);
@@ -223,7 +225,7 @@ export default function Home() {
     setAllChapters(items=>items.map(c=>c.id===id?{...c,...patch}:c));await load();return true;
   }
   async function createProject(){
-    try {const result=await post("createProject",{title:draftTitle.trim()||"未命名小说",summary:draftSummary,story_bible:draftStoryBible});await load();setProjectId(result.id);setChapterId("");setNewOpen(false);setDraftTitle("");setDraftSummary("");setDraftStoryBible("");localStorage.removeItem("novel-new-draft");toast.success("作品已创建");}
+    try {const result=await post("createProject",{title:draftTitle.trim()||"未命名小说",summary:draftSummary,style:draftStyle,story_bible:draftStoryBible});await load();setProjectId(result.id);setChapterId("");setNewOpen(false);setDraftTitle("");setDraftSummary("");setDraftStyle("");setDraftStoryBible("");localStorage.removeItem("novel-new-draft");toast.success("作品已创建");}
     catch(e){toast.error(e instanceof Error?e.message:"创建失败");}
   }
   async function switchProject(nextId:string){
@@ -275,21 +277,24 @@ export default function Home() {
     if((!project&&!draft)||fieldBusy)return;
     if(!model.endpoint||!model.model){toast.error("请先配置模型");return;}
     setFieldBusy(field);setFieldBusyDraft(draft);setFieldProposal(null);
-    const source=draft?{title:draftTitle,summary:draftSummary,story_bible:draftStoryBible,genre:"",style:""}:project!;
+    const source=draft?{title:draftTitle,summary:draftSummary,story_bible:draftStoryBible,genre:"",style:draftStyle}:project!;
     const selected=field==="story_bible"&&operation!=="generate"&&bibleSelection.text&&source.story_bible.slice(bibleSelection.start,bibleSelection.end)===bibleSelection.text?bibleSelection:null;
     try{
       const {result}=await streamRequest({kind:"projectField",field,operation,...model,projectId:draft?undefined:project?.id,title:source.title,summary:source.summary,story_bible:source.story_bible,genre:source.genre,style:source.style,chapters:draft?[]:chapters,instruction:fieldInstruction,fieldSelection:selected?.text||""});
       if(!result?.text?.trim())throw new Error("模型没有返回内容");
-      const next={field,text:result.text.trim(),draft,selectionStart:selected?.start,selectionEnd:selected?.end,baseText:field==="story_bible"?source.story_bible:undefined};
+      const next={field,text:result.text.trim(),draft,selectionStart:selected?.start,selectionEnd:selected?.end,baseText:field==="story_bible"?source.story_bible:field==="style"?source.style:undefined};
       setFieldProposal(next);
       if(!draft)await retainDraft(field,JSON.stringify(next));
-    }catch(e){if(streamingRef.current){const partial={field,text:streamingRef.current,draft,selectionStart:selected?.start,selectionEnd:selected?.end,baseText:field==="story_bible"?source.story_bible:undefined};setFieldProposal(partial);if(!draft)await retainDraft(field,JSON.stringify(partial));}toast.error(e instanceof Error?e.message:"生成中断，已保留收到的内容");}
+    }catch(e){if(streamingRef.current){const partial={field,text:streamingRef.current,draft,selectionStart:selected?.start,selectionEnd:selected?.end,baseText:field==="story_bible"?source.story_bible:field==="style"?source.style:undefined};setFieldProposal(partial);if(!draft)await retainDraft(field,JSON.stringify(partial));}toast.error(e instanceof Error?e.message:"生成中断，已保留收到的内容");}
     finally{setFieldBusy(null);generationAbort.current=null;}
   }
   async function acceptProjectField(){
     if(!fieldProposal)return;
+    if(fieldProposal.field==="style"&&fieldProposal.text.length>8000){toast.error("创作风格超过 8000 字，请将所需内容复制到文本框中");return;}
     if(fieldProposal.draft){
+      if(fieldProposal.field==="style"&&fieldProposal.baseText!==undefined&&draftStyle!==fieldProposal.baseText){toast.error("创作风格已经修改，请重新生成草稿");return;}
       if(fieldProposal.field==="summary")setDraftSummary(fieldProposal.text);
+      else if(fieldProposal.field==="style")setDraftStyle(fieldProposal.text);
       else setDraftStoryBible(fieldProposal.selectionStart!==undefined&&fieldProposal.baseText!==undefined?fieldProposal.baseText.slice(0,fieldProposal.selectionStart)+fieldProposal.text+fieldProposal.baseText.slice(fieldProposal.selectionEnd):fieldProposal.text);
       setFieldProposal(null);
       toast.success("已采用草稿，创建作品后保存");
@@ -297,6 +302,7 @@ export default function Home() {
     }
     if(!project)return;
     if(fieldProposal.field==="story_bible"&&fieldProposal.baseText!==undefined&&project.story_bible!==fieldProposal.baseText){toast.error("故事资料已经修改，请重新生成草稿");return;}
+    if(fieldProposal.field==="style"&&fieldProposal.baseText!==undefined&&project.style!==fieldProposal.baseText){toast.error("创作风格已经修改，请重新生成草稿");return;}
     const value=fieldProposal.selectionStart!==undefined&&fieldProposal.selectionEnd!==undefined&&fieldProposal.baseText!==undefined
       ?fieldProposal.baseText.slice(0,fieldProposal.selectionStart)+fieldProposal.text+fieldProposal.baseText.slice(fieldProposal.selectionEnd)
       :fieldProposal.text;
@@ -312,8 +318,8 @@ export default function Home() {
     finally{setFieldBusy(null);}
   }
   function projectFieldActions(field:ProjectField,draft=false){
-    const value=draft?(field==="summary"?draftSummary:draftStoryBible):(project?.[field]||"");
-    const label=field==="summary"?"小说概要":"故事资料";
+    const value=draft?(field==="summary"?draftSummary:field==="style"?draftStyle:draftStoryBible):(project?.[field]||"");
+    const label=field==="summary"?"小说概要":field==="style"?"创作风格":"故事资料";
     return <div className="field-ai"><div className="field-ai-actions">
       <Button variant="outline" size="sm" disabled={!!fieldBusy} onClick={()=>void generateProjectField(field,"generate",draft)}><Sparkles size={14}/>{fieldBusy===field?"生成中…":"AI 生成"}</Button>
       <Button variant="outline" size="sm" disabled={!!fieldBusy||!value.trim()} onClick={()=>void generateProjectField(field,"expand",draft)}>扩写{field==="story_bible"&&bibleSelection.text?"选中段落":""}</Button>
@@ -454,7 +460,7 @@ export default function Home() {
     if(!project||exportBusy)return;setExportBusy(true);
     try{
       if(!await flushAllChapters())return;
-      const parts=[`# ${project.title}\n\n## 小说概要\n\n${project.summary||""}\n\n## 故事资料\n\n${project.story_bible||""}\n\n`];
+      const parts=[`# ${project.title}\n\n## 小说概要\n\n${project.summary||""}\n\n## 创作风格\n\n${project.style||""}\n\n## 故事资料\n\n${project.story_bible||""}\n\n`];
       for(let index=0;index<chapters.length;index+=3){
         const rows=await fetchChapterBatch(project.id,chapters.slice(index,index+3).map(c=>c.id),"body");
         rows.forEach((c,i)=>parts.push(`## 第${index+i+1}章 ${c.title}\n\n> ${c.synopsis}\n\n${c.body||""}\n\n`));
@@ -476,6 +482,8 @@ export default function Home() {
       <div className="project-switcher"><label htmlFor="project-select">共享作品集</label><select id="project-select" aria-label="选择作品" value={projectId} onChange={e=>void switchProject(e.target.value)}><option value="" disabled>选择作品</option>{projects.map(p=><option key={p.id} value={p.id}>{p.title}</option>)}</select><Dialog open={newOpen} onOpenChange={setNewOpen}><button className="icon-button" aria-label="新建作品" title="新建作品" onClick={()=>setNewOpen(true)}><Plus size={18}/></button><DialogContent className="settings-dialog character-dialog"><DialogHeader><DialogTitle>新建小说</DialogTitle></DialogHeader>
         <div className="field"><Label htmlFor="new-title">书名</Label><Input id="new-title" value={draftTitle} onChange={e=>setDraftTitle(e.target.value)} placeholder="为故事起一个名字"/></div>
         <div className="field"><Label htmlFor="new-summary">小说概要</Label><Textarea id="new-summary" value={draftSummary} onChange={e=>setDraftSummary(e.target.value)} placeholder="这本小说讲述什么故事？" rows={3}/></div>{projectFieldActions("summary",true)}
+        <div className="field"><Label htmlFor="new-style">创作风格</Label><Textarea id="new-style" className="creative-style-editor" rows={4} maxLength={8000} value={draftStyle} onChange={e=>setDraftStyle(e.target.value)} placeholder="自由填写题材、视角、文风、节奏与禁忌……"/></div>
+        {!draftStyle.trim()&&<Button className="style-template-button" variant="outline" size="sm" onClick={()=>setDraftStyle(creativeStyleTemplate)}>插入风格模板</Button>}{projectFieldActions("style",true)}
         <div className="field"><Label htmlFor="new-bible">故事资料（可选）</Label><Textarea id="new-bible" className="story-bible-editor" rows={12} value={draftStoryBible} onSelect={e=>{const el=e.currentTarget;setBibleSelection({start:el.selectionStart,end:el.selectionEnd,text:el.value.slice(el.selectionStart,el.selectionEnd)});}} onChange={e=>{setDraftStoryBible(e.target.value);setBibleSelection({start:0,end:0,text:""});}} placeholder="用 # 主线、# 人物等标签自由记录故事设定……"/></div>
         {!draftStoryBible.trim()&&<Button variant="outline" size="sm" onClick={()=>setDraftStoryBible(storyTemplate)}>插入默认模板</Button>}{projectFieldActions("story_bible",true)}
         <div className="dialog-actions"><Button onClick={()=>void createProject()}>创建作品</Button></div></DialogContent></Dialog></div>
@@ -486,7 +494,7 @@ export default function Home() {
       <h3 className="history-heading">可恢复版本</h3>{snapshots.filter(s=>s.project_id===projectId).map(s=><div className="history-item" key={s.id}><span>{s.reason}<small>{new Date(s.created_at).toLocaleString("zh-CN")}</small></span><Button variant="outline" size="sm" onClick={async()=>{if(!window.confirm("将整部作品恢复到这个版本？当前状态会先自动备份。"))return;if(!await flushAllChapters())return;await post("restoreSnapshot",{id:s.id});await load();setChapterId("");setShowHistory(false);toast.success("已恢复版本");}}>恢复</Button></div>)}
       <h3 className="history-heading">近期 AI 草稿</h3>{drafts.filter(d=>d.project_id===projectId).map(d=><div className="history-item" key={d.id}><span>{d.kind}<small>{new Date(d.created_at).toLocaleString("zh-CN")}</small></span><Button variant="outline" size="sm" onClick={()=>{
         if(d.kind==="reviewSettings"){setReviewText(d.content);setStoryOpen(true);}
-        else if(d.kind==="summary"||d.kind==="story_bible"){
+        else if(d.kind==="summary"||d.kind==="story_bible"||d.kind==="style"){
           let saved:FieldProposal|undefined;try{const parsed=JSON.parse(d.content) as FieldProposal;if(parsed?.field===d.kind&&typeof parsed.text==="string")saved=parsed;}catch{}
           setFieldProposal(saved||{field:d.kind,text:d.content,draft:false});setStoryOpen(true);
         }else{let cs;try{cs=JSON.parse(d.content);}catch{}
@@ -539,9 +547,9 @@ export default function Home() {
       </Dialog>
       <main className={`main-area ${view==="read"?"reading-mode":""}`}><div className="main-top"><button className="icon-button sidebar-toggle" title="章节目录" aria-label="展开或收起章节目录" aria-controls="chapter-directory" aria-expanded={sidebar} onClick={()=>setSidebar(!sidebar)}>{sidebar?<PanelLeftClose size={20}/>:<PanelLeftOpen size={20}/>}<span className="directory-button-label">章节目录</span></button><div className="breadcrumb">{project?.title||"新作品"}<span>/</span>{(view==="read"?readingChapter:chapter)?.title||"大纲"}</div>{project&&<><Button className="version-button" variant="ghost" size="sm" onClick={()=>setShowHistory(true)}>版本</Button></>}{project&&<Dialog open={storyOpen} onOpenChange={async open=>{if(!open&&projectDirty){if(!await saveProject(project||{}))return;}setStoryOpen(open);}}><Button className="story-settings-button" variant="ghost" size="sm" onClick={()=>{setStoryOpen(true);}}>作品设定 <ArrowRight size={14}/></Button><DialogContent className="settings-dialog character-dialog"><DialogHeader><DialogTitle>作品设定</DialogTitle></DialogHeader>
         <div className="field"><Label htmlFor="story-title">书名</Label><Input id="story-title" value={project.title} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,title:e.target.value}:p));}}/></div>
-        <div className="field"><Label htmlFor="story-genre">题材</Label><Input id="story-genre" value={project.genre} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,genre:e.target.value}:p));}} placeholder="悬疑、科幻、奇幻……"/></div>
         <div className="field"><Label htmlFor="story-summary">小说概要</Label><Textarea id="story-summary" rows={4} value={project.summary} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,summary:e.target.value}:p));}} placeholder="概括故事主线、人物和吸引读者的悬念……"/></div>{projectFieldActions("summary")}
-        <div className="field"><Label htmlFor="story-style">文风</Label><Textarea id="story-style" rows={2} value={project.style} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,style:e.target.value}:p));}} placeholder="例如：克制、细腻、第三人称……"/></div>
+        <div className="field"><Label htmlFor="story-style">创作风格</Label><Textarea id="story-style" className="creative-style-editor" rows={4} maxLength={8000} disabled={!!fieldBusy} value={project.style} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,genre:"",style:e.target.value}:p));}} placeholder="自由填写题材、叙事视角、语言风格、节奏和希望避免的写法……"/></div>
+        {!project.style.trim()&&<Button className="style-template-button" variant="outline" size="sm" disabled={!!fieldBusy} onClick={()=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,genre:"",style:creativeStyleTemplate}:p));}}>插入风格模板</Button>}{projectFieldActions("style")}
         <h3 className="history-heading">故事资料</h3><p className="dialog-note">在同一个文本框里用 # 标题自由区分主线、人物和其他设定。标签可以随时增删。</p>
         <div className="field"><Label htmlFor="story-bible">资料正文</Label><Textarea id="story-bible" className="story-bible-editor" rows={18} value={project.story_bible||""} onSelect={e=>{const el=e.currentTarget;setBibleSelection({start:el.selectionStart,end:el.selectionEnd,text:el.value.slice(el.selectionStart,el.selectionEnd)});}} onChange={e=>{setProjectDirty(true);setBibleSelection({start:0,end:0,text:""});setProjects(items=>items.map(p=>p.id===project.id?{...p,story_bible:e.target.value}:p));}} placeholder="例如：# 故事主线\n# 人物\n# 世界与规则……"/></div>
         {!project.story_bible?.trim()&&<Button variant="outline" size="sm" onClick={()=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,story_bible:storyTemplate}:p));}}>插入默认模板</Button>}

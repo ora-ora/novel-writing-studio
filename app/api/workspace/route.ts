@@ -71,7 +71,7 @@ export async function POST(request:Request) {
     if(action==="createProject"){
       const newId=crypto.randomUUID();
       await db().prepare("INSERT INTO projects (id,title,premise,summary,mainline,story_bible,important_notes,genre,style,updated_at,workspace_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
-        .bind(newId,str(data.title||"未命名小说",120),"",str(data.summary,8000),"",str(data.story_bible,60000),"",str(data.genre,200),str(data.style,2000),now(),session.id).run();
+        .bind(newId,str(data.title||"未命名小说",120),"",str(data.summary,8000),"",str(data.story_bible,60000),"",str(data.genre,200),str(data.style,8000),now(),session.id).run();
       return Response.json({id:newId});
     }
     if(action==="updateProject"&&id){
@@ -79,7 +79,7 @@ export async function POST(request:Request) {
       const previous=await activeProject(id);
       const bibleChanged=String(previous?.story_bible||"")!==str(data.story_bible,60000);
       await db().batch([await snapshot(id,"修改作品设定前"),db().prepare("UPDATE projects SET title=?,summary=?,story_bible=?,genre=?,style=?,updated_at=? WHERE id=?")
-        .bind(str(data.title||"未命名小说",120),str(data.summary,8000),str(data.story_bible,60000),str(data.genre,200),str(data.style,2000),now(),id),...(bibleChanged?[db().prepare("UPDATE chapters SET continuity_review=1 WHERE project_id=? AND deleted_at IS NULL AND body<>''").bind(id)]:[])]);
+        .bind(str(data.title||"未命名小说",120),str(data.summary,8000),str(data.story_bible,60000),str(data.genre,200),str(data.style,8000),now(),id),...(bibleChanged?[db().prepare("UPDATE chapters SET continuity_review=1 WHERE project_id=? AND deleted_at IS NULL AND body<>''").bind(id)]:[])]);
       return Response.json({ok:true});
     }
     if(action==="snapshotProject"&&projectId){
@@ -169,7 +169,7 @@ export async function POST(request:Request) {
       await db().batch([await snapshot(restoreProjectId,"恢复前备份"),db().prepare("UPDATE chapters SET deleted_at=?,updated_at=? WHERE project_id=? AND deleted_at IS NULL").bind(now(),now(),restoreProjectId),
         ...payload.chapters.map((c,i)=>insertChapter(restoreProjectId,c,i)),
         db().prepare("UPDATE projects SET title=?,premise=?,summary=?,mainline=?,story_bible=?,important_notes=?,genre=?,style=?,updated_at=? WHERE id=?")
-          .bind(str(payload.project.title,120),str(payload.project.premise,12000),str(payload.project.summary,8000),str(payload.project.mainline,10000),str(payload.project.story_bible===undefined?previousStoryBible(payload.project,payload.characters,payload.cards):payload.project.story_bible,60000),str(payload.project.important_notes,6000),str(payload.project.genre,200),str(payload.project.style,2000),now(),restoreProjectId),
+          .bind(str(payload.project.title,120),str(payload.project.premise,12000),str(payload.project.summary,8000),str(payload.project.mainline,10000),str(payload.project.story_bible===undefined?previousStoryBible(payload.project,payload.characters,payload.cards):payload.project.story_bible,60000),str(payload.project.important_notes,6000),str(payload.project.genre,200),str(payload.project.style,8000),now(),restoreProjectId),
         ...(payload.characters?[db().prepare("DELETE FROM characters WHERE project_id=?").bind(restoreProjectId),...payload.characters.map(c=>db().prepare("INSERT INTO characters (id,project_id,name,role,goal,traits,relationships,secret,arc,from_chapter,until_chapter,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").bind(String(c.id),restoreProjectId,str(c.name,120),str(c.role,200),str(c.goal,2000),str(c.traits,2000),str(c.relationships,2000),str(c.secret,2000),str(c.arc,2000),c.from_chapter??null,c.until_chapter??null,now()))]:[]),
         ...(payload.cards?[db().prepare("DELETE FROM lore_cards WHERE project_id=?").bind(restoreProjectId),...payload.cards.map(c=>db().prepare("INSERT INTO lore_cards (id,project_id,category,content,from_chapter,until_chapter,done,updated_at) VALUES (?,?,?,?,?,?,?,?)").bind(String(c.id),restoreProjectId,str(c.category,40),str(c.content,2500),c.from_chapter??null,c.until_chapter??null,Number(c.done)||0,now()))]:[])]);
       return Response.json({id:restoreProjectId});

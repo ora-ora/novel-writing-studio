@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import ts from "typescript";
 import { batchAround, fetchChapterBatch, hasBody } from "../lib/chapters.ts";
 import { moveChapterId } from "../lib/chapter-order.ts";
+import { mergeCreativeStyle } from "../lib/creative-style.ts";
 
 const workspace = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const anotherWorkspace = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -234,6 +235,63 @@ test("AI can use a shared work without cookies and preserves the existing global
     assert.equal((await h.ai(hosted, null)).status, 200);
     assert.equal((await h.ai(hosted, anotherWorkspace)).status, 429);
     assert.equal(h.database.prepare("SELECT calls FROM generation_quota WHERE day=? AND workspace_id='global'").get(day).calls, 30);
+  } finally { h.close(); }
+});
+
+test("legacy genre and style merge without losing either field or duplicating on reload", () => {
+  const merged = mergeCreativeStyle("都市悬疑", "克制、第一人称\n章末保留悬念");
+  assert.equal(merged, "题材：都市悬疑\n\n文风：克制、第一人称\n章末保留悬念");
+  assert.equal(mergeCreativeStyle("", merged), merged);
+  assert.equal(mergeCreativeStyle(null, undefined), "");
+  assert.equal(mergeCreativeStyle("科幻", ""), "题材：科幻");
+  assert.equal(mergeCreativeStyle("", "自由标签：保留换行\n"), "自由标签：保留换行\n");
+});
+
+test("unified creative style saves beyond the old limit and survives snapshot restoration", async () => {
+  const h = await harness();
+  try {
+    h.database.prepare("UPDATE projects SET genre=?,style=? WHERE id='novel'").run("悬疑", "冷峻");
+    const old = (await (await h.get()).json()).projects.find(p => p.id === "novel");
+    const unified = mergeCreativeStyle(old.genre, old.style);
+    const style = unified + "\n节奏：" + "逐步推进。".repeat(600);
+    assert.ok(style.length > 2000);
+    const originalBody = h.database.prepare("SELECT body FROM chapters WHERE id='c0'").get().body;
+    assert.equal((await h.post({ ...old, action: "updateProject", genre: "", style })).status, 200);
+    assert.equal((await h.post({ action: "snapshotProject", projectId: "novel", reason: "风格恢复测试" })).status, 200);
+    const saved = (await (await h.get()).json()).projects.find(p => p.id === "novel");
+    assert.equal(saved.genre, ""); assert.equal(saved.style, style);
+    const snapshot = h.database.prepare("SELECT id FROM project_snapshots WHERE reason='风格恢复测试'").get().id;
+    await h.post({ ...saved, action: "updateProject", style: "新风格" });
+    assert.equal((await h.post({ action: "restoreSnapshot", id: snapshot })).status, 200);
+    const restored = (await (await h.get()).json()).projects.find(p => p.id === "novel");
+    assert.equal(restored.style, style);
+    assert.equal(h.database.prepare("SELECT body FROM chapters WHERE id='c0'").get().body, originalBody);
+    const created = await (await h.post({ action: "createProject", title: "新作", style })).json();
+    assert.equal(h.database.prepare("SELECT style FROM projects WHERE id=?").get(created.id).style, style);
+  } finally { h.close(); }
+});
+
+test("style AI supports all operations, preserves drafts, and informs outline and body prompts", async () => {
+  const h = await harness();
+  try {
+    const style = "题材：悬疑\n视角：第一人称\n避免：旁白解释" + "。".repeat(2100) + "末尾风格约束";
+    for (const operation of ["generate", "expand", "rewrite"]) {
+      const response = await h.ai({ kind: "projectField", field: "style", operation, style, selected: undefined });
+      assert.equal(response.status, 200);
+      assert.ok(h.prompts.at(-1).includes("只输出可直接填入「创作风格」"));
+      assert.ok(h.prompts.at(-1).includes("末尾风格约束"));
+    }
+    const count = h.prompts.length;
+    assert.equal((await h.ai({ kind: "projectField", field: "style", operation: "expand", style: "", selected: undefined })).status, 400);
+    assert.equal(h.prompts.length, count);
+    for (const kind of ["outline", "body"]) {
+      assert.equal((await h.ai({ kind, style })).status, 200);
+      assert.ok(h.prompts.at(-1).includes("创作风格：" + style));
+    }
+    const draft = await h.post({ action: "saveDraft", projectId: "novel", kind: "style", content: JSON.stringify({ field: "style", text: "预览草稿", draft: false }) });
+    assert.equal(draft.status, 200);
+    assert.ok((await (await h.get()).json()).drafts.some(d => d.kind === "style" && d.content.includes("预览草稿")));
+    assert.equal(h.database.prepare("SELECT style FROM projects WHERE id='novel'").get().style, "");
   } finally { h.close(); }
 });
 

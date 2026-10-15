@@ -1,3 +1,4 @@
+import { mergeCreativeStyle } from "../../../lib/creative-style";
 import { env } from "cloudflare:workers";
 
 export const runtime = "edge";
@@ -60,7 +61,7 @@ export async function POST(request:Request) {
       }
     }
     const outline = chapters.map((c,i)=>`第${i+1}章 ${c.title}：${c.synopsis}`).join("\n").slice(0,30000);
-    const context = `书名：${String(input.title||"").slice(0,120)}\n题材：${String(input.genre||"").slice(0,200)}\n小说概要：${String(input.summary||"").slice(0,8000)}\n文风：${String(input.style||"").slice(0,2000)}\n故事资料（作者自定标签；尚未揭露的秘密只在章节大纲明确要求时写出）：\n${String(input.story_bible||"").slice(0,40000)}`;
+    const context = `书名：${String(input.title||"").slice(0,120)}\n小说概要：${String(input.summary||"").slice(0,8000)}\n创作风格：${mergeCreativeStyle(input.genre,input.style).slice(0,8000)}\n故事资料（作者自定标签；尚未揭露的秘密只在章节大纲明确要求时写出）：\n${String(input.story_bible||"").slice(0,40000)}`;
     const instruction = String(input.instruction || "").slice(0,3000);
     const count = Math.min(30,Math.max(1,Number(input.count)||8));
     let prompt = ""; let json = false;
@@ -88,13 +89,14 @@ export async function POST(request:Request) {
     } else if (kind === "projectField") {
       const field = input.field;
       const operation = input.operation;
-      if (field !== "summary" && field !== "story_bible") return error("未知作品字段");
+      if (field !== "summary" && field !== "story_bible" && field !== "style") return error("未知作品字段");
       if (operation !== "generate" && operation !== "expand" && operation !== "rewrite") return error("未知修改方式");
-      const current = String(input[field] || "").slice(0, field === "summary" ? 8000 : 40000);
+      const current = (field === "style" ? mergeCreativeStyle(input.genre,input.style) : String(input[field] || "")).slice(0, field === "story_bible" ? 40000 : 8000);
       if (operation !== "generate" && !current.trim()) return error("请先填写内容，再扩写或重写");
-      const label = field === "summary" ? "小说概要" : "故事资料";
+      const label = field === "summary" ? "小说概要" : field === "style" ? "创作风格" : "故事资料";
       const goal = field === "summary"
         ? "写成一段清楚的故事概要，交代主要人物、核心冲突、故事发展和吸引读者的悬念；避免提前定死尚未确定的结局。"
+        : field === "style" ? "整理为作者可自由编辑的创作风格说明，可用题材、视角、文风、节奏、避免等标签。遵守已有偏好，未确定的部分可留空，不编造剧情或人物事实。全文不超过8000字。"
         : "用作者自定的 # 标题或标签组织主线、人物、世界规则、时间线、伏笔与禁忌。保留已有确定事实与标签，不强迫填写固定字段。";
       const action = operation === "generate"
         ? "根据已有作品资料生成"
