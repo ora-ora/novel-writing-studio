@@ -30,14 +30,14 @@ export async function GET(request:Request) {
   const session=workspaceSession(request);
   try {
     const [projects,chapters,cards,characters,snapshots,drafts]=await Promise.all([
-      db().prepare("SELECT * FROM projects WHERE (workspace_id=? OR workspace_id='legacy') AND deleted_at IS NULL ORDER BY updated_at DESC").bind(session.id).all<Row>(),
-      db().prepare("SELECT c.* FROM chapters c JOIN projects p ON p.id=c.project_id WHERE (p.workspace_id=? OR p.workspace_id='legacy') AND p.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY c.position ASC").bind(session.id).all<Row>(),
+      db().prepare("SELECT * FROM projects WHERE workspace_id=? AND deleted_at IS NULL ORDER BY updated_at DESC").bind(session.id).all<Row>(),
+      db().prepare("SELECT c.* FROM chapters c JOIN projects p ON p.id=c.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY c.position ASC").bind(session.id).all<Row>(),
       db().prepare("SELECT l.* FROM lore_cards l JOIN projects p ON p.id=l.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY l.updated_at DESC").bind(session.id).all<Row>(),
       db().prepare("SELECT c.* FROM characters c JOIN projects p ON p.id=c.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY c.updated_at DESC").bind(session.id).all<Row>(),
       db().prepare("SELECT s.id,s.project_id,s.reason,s.created_at FROM project_snapshots s JOIN projects p ON p.id=s.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY s.created_at DESC LIMIT 30").bind(session.id).all<Row>(),
       db().prepare("SELECT d.* FROM generation_drafts d JOIN projects p ON p.id=d.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY d.created_at DESC LIMIT 30").bind(session.id).all<Row>(),
     ]);
-    return sessionResponse({projects:projects.results.map(p=>({...p,legacy:p.workspace_id==="legacy"})),chapters:chapters.results,cards:cards.results,characters:characters.results,snapshots:snapshots.results,drafts:drafts.results},session);
+    return sessionResponse({projects:projects.results,chapters:chapters.results,cards:cards.results,characters:characters.results,snapshots:snapshots.results,drafts:drafts.results},session);
   }catch(error){console.error("workspace read",error);return fail("项目暂时无法读取，请稍后刷新。",503);}
 }
 
@@ -53,22 +53,6 @@ export async function POST(request:Request) {
       const newId=crypto.randomUUID();
       await db().prepare("INSERT INTO projects (id,title,premise,summary,mainline,important_notes,genre,style,updated_at,workspace_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
         .bind(newId,str(data.title||"未命名小说",120),str(data.premise,12000),str(data.summary,8000),str(data.mainline,10000),str(data.important_notes,6000),str(data.genre,200),str(data.style,2000),now(),session.id).run();
-      return Response.json({id:newId});
-    }
-    if(action==="cloneLegacy"&&id){
-      const old=await db().prepare("SELECT * FROM projects WHERE id=? AND workspace_id='legacy' AND deleted_at IS NULL").bind(id).first<Row>();
-      if(!old)return fail("旧版作品不存在",404);
-      const chapters=await db().prepare("SELECT * FROM chapters WHERE project_id=? AND deleted_at IS NULL ORDER BY position").bind(id).all<Row>();
-      const oldCards=await db().prepare("SELECT * FROM lore_cards WHERE project_id=?").bind(id).all<Row>();
-      const oldCharacters=await db().prepare("SELECT * FROM characters WHERE project_id=?").bind(id).all<Row>();
-      const newId=crypto.randomUUID();
-      await db().batch([
-        db().prepare("INSERT INTO projects (id,title,premise,summary,mainline,important_notes,genre,style,updated_at,workspace_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
-          .bind(newId,str(old.title,120),str(old.premise,12000),str(old.summary,8000),str(old.mainline,10000),str(old.important_notes,6000),str(old.genre,200),str(old.style,2000),now(),session.id),
-        ...chapters.results.map((c,i)=>insertChapter(newId,{...c,id:crypto.randomUUID()},i)),
-        ...oldCards.results.map(c=>db().prepare("INSERT INTO lore_cards (id,project_id,category,content,from_chapter,until_chapter,done,updated_at) VALUES (?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),newId,str(c.category,40),str(c.content,2500),c.from_chapter??null,c.until_chapter??null,Number(c.done)||0,now())),
-        ...oldCharacters.results.map(c=>db().prepare("INSERT INTO characters (id,project_id,name,role,goal,traits,relationships,secret,arc,from_chapter,until_chapter,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),newId,str(c.name,120),str(c.role,200),str(c.goal,2000),str(c.traits,2000),str(c.relationships,2000),str(c.secret,2000),str(c.arc,2000),c.from_chapter??null,c.until_chapter??null,now())),
-      ]);
       return Response.json({id:newId});
     }
     if(action==="updateProject"&&id){
