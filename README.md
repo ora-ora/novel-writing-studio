@@ -29,7 +29,7 @@
 
 ## 独立部署到 Cloudflare Workers
 
-以下步骤基于仓库当前锁定的 Vinext、Cloudflare Vite plugin 和 Wrangler 版本。建议在自己的 fork 或独立分支中完成；这些是需要执行的配置调整，仓库默认仍使用 Sites 配置。不要直接运行最新版框架初始化工具覆盖现有项目。
+仓库已提供独立配置 `wrangler.cloudflare.jsonc` 与 GitHub Actions 流水线 `.github/workflows/cloudflare.yml`。独立构建使用 `cloudflare` 模式；普通 `build` 保留 Sites 配置，两者分别管理数据库与站点。以下步骤基于仓库锁定的依赖版本，不要用最新版框架初始化工具覆盖项目。
 
 ### 1. 准备环境与数据库
 
@@ -41,14 +41,14 @@ cd novel-writing-studio
 corepack enable
 pnpm install --frozen-lockfile
 pnpm exec wrangler login
-pnpm exec wrangler d1 create novel-studio-db
+pnpm exec wrangler d1 create novel_studio_db
 ```
 
 保存创建结果中的 `database_id`，下一步填入配置。D1 数据库 ID 和 Cloudflare API Token 不是同一个东西；不要把 API Token 或模型密钥写入配置文件。
 
-### 2. 添加独立部署配置
+### 2. 检查独立部署配置
 
-在仓库根目录创建 `wrangler.jsonc`，将 `替换为真实的数据库UUID` 改为上一步返回的值。Worker 名称 `novel-studio` 可以自行修改，后续命令保持一致。
+当前 `wrangler.cloudflare.jsonc` 已配置 Worker `novel-studio`、数据库 `novel_studio_db`，数据库 ID 为 `2b4baeb5-c2e4-480c-aa74-2a72d5302576`。使用当前账号部署无需重复创建数据库；部署到其他账号时，必须先创建自己的数据库并替换 ID。
 
 ```jsonc
 {
@@ -61,7 +61,7 @@ pnpm exec wrangler d1 create novel-studio-db
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "novel-studio-db",
+      "database_name": "novel_studio_db",
       "database_id": "替换为真实的数据库UUID",
       "migrations_dir": "drizzle"
     }
@@ -69,25 +69,7 @@ pnpm exec wrangler d1 create novel-studio-db
 }
 ```
 
-修改 `vite.config.ts`：
-
-1. 删除 `hostingConfig` 和 `sites` 两个 import。
-2. 删除占位数据库 ID、`const { d1, r2 } = hostingConfig` 和整个 `localBindingConfig` 对象。
-3. 从 `plugins` 中删除 `sites({ mockAuth: !managedLinux })`。
-4. 将 Cloudflare 插件的 `config: localBindingConfig` 改为 `configPath: "./wrangler.jsonc"`，保留其他 Vinext、Cloudflare 插件与环境设置。
-
-调整后的插件部分应为：
-
-```ts
-plugins: [
-  vinext(),
-  cloudflare({
-    viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
-    inspectorPort: false,
-    configPath: "./wrangler.jsonc",
-  }),
-],
-```
+`vite.config.ts` 已按构建模式选择配置：`build:cloudflare` / `dev:cloudflare` 使用独立 Wrangler 配置；默认模式仍使用 Sites 绑定。无需删除 Sites 插件或修改默认配置。
 
 数据库绑定名称必须为 `DB`，因为服务端代码读取 `env.DB`。不要使用原配置中的全零占位数据库 ID，也不要手动编辑 `dist/server/wrangler.json`；它是构建产物，会被重新生成。独立部署不使用 `.openai/hosting.json` 中的 Sites 项目 ID，也不需要修改原站的 ID。
 
@@ -96,8 +78,8 @@ plugins: [
 确认配置指向刚创建的、空的 D1 数据库后执行：
 
 ```bash
-pnpm exec wrangler d1 migrations list DB --remote --config wrangler.jsonc
-pnpm exec wrangler d1 migrations apply DB --remote --config wrangler.jsonc
+pnpm exec wrangler d1 migrations list DB --remote --config wrangler.cloudflare.jsonc
+pnpm run db:migrate:cloudflare
 ```
 
 必须执行 `drizzle/` 中的全部未应用迁移，不能只运行第一份建表 SQL。后续发布也需要检查并应用新增迁移。现有迁移含旧版共享数据清理操作；如果目标库已有数据，先备份和检查 SQL，不要把这套初始化命令用于未确认的现有数据库。
@@ -106,8 +88,8 @@ pnpm exec wrangler d1 migrations apply DB --remote --config wrangler.jsonc
 
 ```bash
 pnpm exec tsc --noEmit
-pnpm run build
-pnpm exec wrangler deploy --config dist/server/wrangler.json
+pnpm run build:cloudflare
+pnpm run deploy:cloudflare
 ```
 
 部署使用构建后生成的 Worker 配置，而不是直接上传源码入口。成功后 Wrangler 会输出实际访问地址，例如 `https://novel-studio.<你的子域>.workers.dev`。
@@ -115,7 +97,7 @@ pnpm exec wrangler deploy --config dist/server/wrangler.json
 如果需要默认 DeepSeek 模型，部署后执行以下命令，并在交互提示中输入新密钥：
 
 ```bash
-pnpm exec wrangler secret put DEEPSEEK_API_KEY --name novel-studio --config wrangler.jsonc
+pnpm exec wrangler secret put DEEPSEEK_API_KEY --name novel-studio --config wrangler.cloudflare.jsonc
 ```
 
 也可在 Cloudflare 控制台的对应 Worker → Settings → Variables and Secrets 中添加同名 Secret。密钥不要提交到 Git、写入 README、放入前端环境变量或直接带在命令参数中。当前默认模型名称与调用规则见 `app/api/generate/route.ts`；更换默认模型需同步修改前端和服务端默认值。
@@ -129,15 +111,28 @@ pnpm exec wrangler secret put DEEPSEEK_API_KEY --name novel-studio --config wran
 - 用手机检查作品选择、章节目录、作品设定和 AI 助手。
 - 需要自定义域名时，在对应 Worker 的 Settings → Domains & Routes 中配置；不要为同一匿名工作区随意切换域名。
 
-后续更新先拉取代码、安装锁定依赖、检查迁移，再重新构建部署。`dist/` 不提交到 Git；不要直接修改构建产物。连接 GitHub 自动部署时，需要在 CI 中完成相同的构建/迁移/发布步骤，并把 `CLOUDFLARE_API_TOKEN` 与 `CLOUDFLARE_ACCOUNT_ID` 配置为 CI 密钥，不要写入仓库。CI 发布凭据和应用运行时的 `DEEPSEEK_API_KEY` 分开管理。
+后续更新先拉取代码、安装锁定依赖、检查迁移，再重新构建部署。`dist/` 不提交到 Git；不要直接修改构建产物。CI 发布凭据和应用运行时的 `DEEPSEEK_API_KEY` 分开管理。
+
+### GitHub Actions 自动更新
+
+在 GitHub 仓库的 Settings → Secrets and variables → Actions 添加以下 repository secrets：
+
+| 名称 | 值 |
+| --- | --- |
+| `CLOUDFLARE_API_TOKEN` | 限定目标账号的 Workers 部署 Token，执行迁移还需 D1 编辑权限。 |
+| `CLOUDFLARE_ACCOUNT_ID` | 目标 Cloudflare 账号 ID。 |
+
+进入 Actions → Cloudflare CI/CD 可以查看日志或点击 Run workflow 手动发布。PR 只做类型检查、独立构建与部署目标校验；推送到 `main` 或手动运行 `main` 时，在检查成功后执行 D1 迁移与 Worker 部署。只有 Markdown 文档变化不会自动触发；文档更新需要发布时可手动运行。部署并发串行执行，不会中途取消正在执行的迁移。首次运行若提示 GitHub Actions 被禁用，先在仓库中启用 Actions。
+
+部署成功的实际地址在 `Deploy Worker` 步骤日志中。模型密钥只需在对应 Worker 的 Secrets 配置一次，后续普通代码发布会保留。首次发布未配置默认模型密钥时，可先测试创建作品和自定义模型。
 
 ## 本地独立运行与其他服务器
 
-完成上面的 `wrangler.jsonc` 和 Vite 配置调整后，可使用本地 D1 开发：
+检查 `wrangler.cloudflare.jsonc` 后，可使用本地 D1 开发：
 
 ```bash
-pnpm exec wrangler d1 migrations apply DB --local --config wrangler.jsonc
-pnpm run dev
+pnpm exec wrangler d1 migrations apply DB --local --config wrangler.cloudflare.jsonc
+pnpm run dev:cloudflare
 ```
 
 本地默认入口为 `http://localhost:5173`，以终端实际输出为准。本地 D1 与远程 D1 互相独立，使用 `--local` 不会初始化线上数据库。不要把 `localhost` 换成普通局域网 HTTP 地址进行生产使用：工作区 Cookie 带有 `Secure` 属性，非 localhost 的访问应提供 HTTPS。

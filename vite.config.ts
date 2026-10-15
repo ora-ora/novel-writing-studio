@@ -35,7 +35,8 @@ const localBindingConfig = {
     : [],
 };
 
-export default defineConfig(async () => {
+export default defineConfig(async ({ mode }) => {
+  const standaloneCloudflare = mode === "cloudflare";
   // Use Miniflare's local Request.cf placeholder unless fetching is requested.
   process.env.CLOUDFLARE_CF_FETCH_ENABLED ??= "false";
   process.env.WRANGLER_SEND_METRICS ??= "false";
@@ -57,11 +58,13 @@ export default defineConfig(async () => {
     },
     plugins: [
       vinext(),
-      sites({ mockAuth: !managedLinux }),
+      ...(!standaloneCloudflare ? [sites({ mockAuth: !managedLinux })] : []),
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         inspectorPort: false,
-        config: localBindingConfig,
+        ...(standaloneCloudflare
+          ? { configPath: "./wrangler.cloudflare.jsonc" }
+          : { config: localBindingConfig }),
       }),
     ],
   };

@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "novel-studio",
+  "main": "vinext/server/fetch-handler",
+  "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "novel_studio_db",
+      "database_id": "2b4baeb5-c2e4-480c-aa74-2a72d5302576",
+      "migrations_dir": "drizzle"
+    }
+  ]
+}
