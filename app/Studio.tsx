@@ -10,35 +10,41 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Toaster, toast } from "sonner";
 
-type Project = {id:string;title:string;premise:string;summary:string;mainline:string;important_notes:string;genre:string;style:string;updated_at:string;};
+type Project = {id:string;title:string;summary:string;story_bible:string;genre:string;style:string;updated_at:string;};
 type Chapter = {id:string;project_id:string;position:number;title:string;synopsis:string;body:string;memory:string;continuity_review:number;outline_revision:number;body_outline_revision:number|null};
-type LoreCard = {id:string;project_id:string;category:string;content:string;from_chapter:number|null;until_chapter:number|null;done:number};
-type Character = {id:string;project_id:string;name:string;role:string;goal:string;traits:string;relationships:string;secret:string;arc:string;from_chapter:number|null;until_chapter:number|null};
-type CharacterDraft = Pick<Character,"name"|"role"|"goal"|"traits"|"relationships"|"secret"|"arc">;
-const blankCharacter:CharacterDraft={name:"",role:"",goal:"",traits:"",relationships:"",secret:"",arc:""};
 type Snapshot = {id:string;project_id:string;reason:string;created_at:string};
 type SavedDraft = {id:string;project_id:string;kind:string;target_id:string|null;content:string;created_at:string};
 type ModelConfig = {endpoint:string;model:string;key:string;temperature:number};
 type Proposal = {kind:"outline"|"append"|"insert"|"rewrite"|"body"|"continue"|"bodyRewrite"|"selection"|"memory"; chapters?:{title:string;synopsis:string}[]; text?:string; target?:string; selection?:string; afterChapterId?:string; insertionOffset?:number; baseBody?:string};
-type ProjectField = "summary"|"mainline"|"important_notes";
+type ProjectField = "summary"|"story_bible";
 type FieldOperation = "generate"|"expand"|"rewrite";
-type FieldProposal = {field:ProjectField;text:string;draft:boolean};
+type FieldProposal = {field:ProjectField;text:string;draft:boolean;selectionStart?:number;selectionEnd?:number;baseText?:string};
+const storyTemplate=`# 故事主线
+主角想要什么：
+最大的阻碍：
+关键转折：
+结局方向：
+
+# 人物
+## 主角
+身份与目标：
+性格与弱点：
+重要关系：
+变化：
+
+# 世界与规则
+
+# 时间线
+
+# 伏笔与禁忌`;
 const defaultModel:ModelConfig = {endpoint:"https://api.deepseek.com/chat/completions",model:"deepseek-flash",key:"",temperature:0.8};
 
 export default function Home() {
   const [projects,setProjects]=useState<Project[]>([]);
   const [allChapters,setAllChapters]=useState<Chapter[]>([]);
-  const [cards,setCards]=useState<LoreCard[]>([]);
-  const [characters,setCharacters]=useState<Character[]>([]);
-  const [settingsSection,setSettingsSection]=useState<"book"|"characters"|"cards">("book");
-  const [characterDraft,setCharacterDraft]=useState<CharacterDraft>(blankCharacter);
-  const [characterId,setCharacterId]=useState("");
-  const [characterFrom,setCharacterFrom]=useState("");
-  const [characterUntil,setCharacterUntil]=useState("");
-  const [characterProposal,setCharacterProposal]=useState<CharacterDraft|null>(null);
-  const [characterBusy,setCharacterBusy]=useState(false);
   const [reviewBusy,setReviewBusy]=useState(false);
   const [reviewText,setReviewText]=useState("");
+  const [bibleSelection,setBibleSelection]=useState({start:0,end:0,text:""});
   const [snapshots,setSnapshots]=useState<Snapshot[]>([]);
   const [drafts,setDrafts]=useState<SavedDraft[]>([]);
   const [projectId,setProjectId]=useState("");
@@ -51,11 +57,6 @@ export default function Home() {
   const [saveError,setSaveError]=useState(false);
   const [streaming,setStreaming]=useState("");
   const [showHistory,setShowHistory]=useState(false);
-  const [cardCategory,setCardCategory]=useState("rule");
-  const [cardText,setCardText]=useState("");
-  const [editingCardId,setEditingCardId]=useState("");
-  const [cardFrom,setCardFrom]=useState("");
-  const [cardUntil,setCardUntil]=useState("");
   const [selection,setSelection]=useState("");
   const [selectionStart,setSelectionStart]=useState(0);
   const [selectionEnd,setSelectionEnd]=useState(0);
@@ -66,9 +67,8 @@ export default function Home() {
   const [storyOpen,setStoryOpen]=useState(false);
   const [projectDirty,setProjectDirty]=useState(false);
   const [draftTitle,setDraftTitle]=useState("");
-  const [draftPremise,setDraftPremise]=useState("");
+  const [draftStoryBible,setDraftStoryBible]=useState("");
   const [draftSummary,setDraftSummary]=useState("");
-  const [draftImportantNotes,setDraftImportantNotes]=useState("");
   const [draftLoaded,setDraftLoaded]=useState(false);
   const [instruction,setInstruction]=useState("");
   const [count,setCount]=useState(8);
@@ -95,7 +95,7 @@ export default function Home() {
 
   const load=useCallback(async()=>{
     try {
-      const response=await fetch("/api/workspace",{cache:"no-store"});const data=await response.json() as {error?:string;projects:Project[];chapters:Chapter[];cards:LoreCard[];characters:Character[];snapshots:Snapshot[];drafts:SavedDraft[]};
+      const response=await fetch("/api/workspace",{cache:"no-store"});const data=await response.json() as {error?:string;projects:Project[];chapters:Chapter[];snapshots:Snapshot[];drafts:SavedDraft[]};
       if(!response.ok) throw new Error(data.error);
       setProjects(data.projects);setAllChapters(data.chapters.map(c=>{
         let backup:Partial<Chapter>={};
@@ -103,7 +103,7 @@ export default function Home() {
         if(Object.keys(backup).length){pendingPatch.current[c.id]={...backup,...pendingPatch.current[c.id]};setSaveError(true);}
         return {...c,...backup,...pendingPatch.current[c.id]};
       }));
-      setCards(data.cards||[]);setCharacters(data.characters||[]);setSnapshots(data.snapshots||[]);setDrafts(data.drafts||[]);
+      setSnapshots(data.snapshots||[]);setDrafts(data.drafts||[]);
       setProjectId(current=>data.projects.some((p:Project)=>p.id===current)?current:(data.projects[0]?.id||""));
       setChapterId(current=>data.chapters.some((c:Chapter)=>c.id===current)?current:(data.chapters[0]?.id||""));
     } catch(e){toast.error(e instanceof Error?e.message:"读取失败");}
@@ -112,8 +112,8 @@ export default function Home() {
   useEffect(()=>{void load();},[load]);
   useEffect(()=>{try{const saved=JSON.parse(localStorage.getItem("novel-model")||"null") as Partial<ModelConfig>|null;if(saved?.endpoint&&saved.model)setModel({...defaultModel,...saved,key:""});}catch{}},[]);
   useEffect(()=>{localStorage.setItem("novel-model",JSON.stringify({endpoint:model.endpoint,model:model.model,temperature:model.temperature}));},[model.endpoint,model.model,model.temperature]);
-  useEffect(()=>{try{const d=JSON.parse(localStorage.getItem("novel-new-draft")||"null") as {title?:string;premise?:string;summary?:string;notes?:string}|null;if(d){setDraftTitle(d.title||"");setDraftPremise(d.premise||"");setDraftSummary(d.summary||"");setDraftImportantNotes(d.notes||"");}}catch{}setDraftLoaded(true);},[]);
-  useEffect(()=>{if(draftLoaded)localStorage.setItem("novel-new-draft",JSON.stringify({title:draftTitle,premise:draftPremise,summary:draftSummary,notes:draftImportantNotes}));},[draftLoaded,draftTitle,draftPremise,draftSummary,draftImportantNotes]);
+  useEffect(()=>{try{const d=JSON.parse(localStorage.getItem("novel-new-draft")||"null") as {title?:string;premise?:string;summary?:string;notes?:string;story_bible?:string}|null;if(d){setDraftTitle(d.title||"");setDraftSummary(d.summary||"");setDraftStoryBible(d.story_bible||[d.premise&&`# 世界与规则\n${d.premise}`,d.notes&&`# 重要提示\n${d.notes}`].filter(Boolean).join("\n\n"));}}catch{}setDraftLoaded(true);},[]);
+  useEffect(()=>{if(draftLoaded)localStorage.setItem("novel-new-draft",JSON.stringify({title:draftTitle,summary:draftSummary,story_bible:draftStoryBible}));},[draftLoaded,draftTitle,draftSummary,draftStoryBible]);
   useEffect(()=>{try{const saved=JSON.parse(localStorage.getItem("novel-field-proposal")||"null") as FieldProposal|null;if(saved?.draft)setFieldProposal(saved);}catch{}},[]);
   useEffect(()=>{if(fieldProposal?.draft)localStorage.setItem("novel-field-proposal",JSON.stringify(fieldProposal));else localStorage.removeItem("novel-field-proposal");},[fieldProposal]);
   useEffect(()=>{if(followStream.current){if(streamBox.current)streamBox.current.scrollTop=streamBox.current.scrollHeight;if(fieldStreamBox.current)fieldStreamBox.current.scrollTop=fieldStreamBox.current.scrollHeight;}},[streaming]);
@@ -145,7 +145,7 @@ export default function Home() {
     setAllChapters(items=>items.map(c=>c.id===id?{...c,...patch}:c));await load();return true;
   }
   async function createProject(){
-    try {const result=await post("createProject",{title:draftTitle.trim()||"未命名小说",premise:draftPremise,summary:draftSummary,important_notes:draftImportantNotes});await load();setProjectId(result.id);setChapterId("");setNewOpen(false);setDraftTitle("");setDraftPremise("");setDraftSummary("");setDraftImportantNotes("");localStorage.removeItem("novel-new-draft");toast.success("作品已创建");}
+    try {const result=await post("createProject",{title:draftTitle.trim()||"未命名小说",summary:draftSummary,story_bible:draftStoryBible});await load();setProjectId(result.id);setChapterId("");setNewOpen(false);setDraftTitle("");setDraftSummary("");setDraftStoryBible("");localStorage.removeItem("novel-new-draft");toast.success("作品已创建");}
     catch(e){toast.error(e instanceof Error?e.message:"创建失败");}
   }
   async function switchProject(nextId:string){
@@ -156,44 +156,15 @@ export default function Home() {
     setProjectId(nextId);
     setChapterId(allChapters.filter(c=>c.project_id===nextId).sort((a,b)=>a.position-b.position)[0]?.id||"");
     setProposal(null);
+    setFieldProposal(null);setBibleSelection({start:0,end:0,text:""});setReviewText("");
     setSelection("");
   }
-  async function saveCard(){
-    if(!project||!cardText.trim())return;
-    if(projectDirty&&!await saveProject(project))return;
-    try{await post("saveLoreCard",{id:editingCardId||undefined,projectId:project.id,category:cardCategory,content:cardText,from_chapter:cardFrom?Number(cardFrom):null,until_chapter:cardUntil?Number(cardUntil):null});setCardText("");setCardFrom("");setCardUntil("");setEditingCardId("");await load();toast.success("设定卡已保存");}
-    catch(e){toast.error(e instanceof Error?e.message:"保存失败");}
-  }
-  function editCharacter(c?:Character){
-    setCharacterId(c?.id||"");setCharacterDraft(c?{name:c.name,role:c.role,goal:c.goal,traits:c.traits,relationships:c.relationships,secret:c.secret,arc:c.arc}:blankCharacter);
-    setCharacterFrom(c?.from_chapter?String(c.from_chapter):"");setCharacterUntil(c?.until_chapter?String(c.until_chapter):"");setCharacterProposal(null);
-  }
-  async function saveCharacterData(value:CharacterDraft){
-    if(!project)return;
-    try{await post("saveCharacter",{projectId:project.id,id:characterId||undefined,...value,from_chapter:characterFrom?Number(characterFrom):null,until_chapter:characterUntil?Number(characterUntil):null});await load();editCharacter();toast.success("人物设定已保存；相关正文已标记待复核");}
-    catch(e){toast.error(e instanceof Error?e.message:"保存人物失败");}
-  }
-  async function generateCharacter(operation:FieldOperation){
-    if(!project||characterBusy||fieldBusy)return;
-    if(!model.endpoint||!model.model){toast.error("请先配置模型");return;}
-    if(projectDirty&&!await saveProject(project))return;
-    setCharacterBusy(true);setCharacterProposal(null);
-    try{
-      const {result}=await streamRequest({kind:"characterField",operation,...model,projectId:project.id,title:project.title,premise:project.premise,summary:project.summary,mainline:project.mainline,important_notes:project.important_notes,genre:project.genre,style:project.style,chapters,character:characterDraft,instruction:fieldInstruction});
-      const raw=(result?.text||"").trim();
-      const parsed=JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g,"")) as Partial<CharacterDraft>;
-      const next={...blankCharacter,...Object.fromEntries(Object.keys(blankCharacter).map(k=>[k,typeof parsed[k as keyof CharacterDraft]==="string"?parsed[k as keyof CharacterDraft]:""]))} as CharacterDraft;
-      if(!next.name.trim())throw new Error("人物草稿缺少姓名，请调整要求重试");
-      setCharacterProposal(next);await retainDraft("character",JSON.stringify(next),characterId||undefined);
-    }catch(e){if(streamingRef.current)await retainDraft("character",streamingRef.current,characterId||undefined);toast.error(e instanceof Error?e.message:"人物生成失败，收到的文字已保留在草稿记录中");}
-    finally{setCharacterBusy(false);generationAbort.current=null;}
-  }
   async function reviewSettings(){
-    if(!project||reviewBusy||fieldBusy||characterBusy)return;
+    if(!project||reviewBusy||fieldBusy)return;
     if(projectDirty&&!await saveProject(project))return;
     if(!await flushAllChapters())return;
     setReviewBusy(true);setReviewText("");
-    try{const {result}=await streamRequest({kind:"reviewSettings",...model,projectId:project.id,title:project.title,premise:project.premise,summary:project.summary,mainline:project.mainline,important_notes:project.important_notes,genre:project.genre,style:project.style,chapters,instruction:fieldInstruction});const report=result?.text||"";if(!report.trim())throw new Error("模型没有返回检查结果");setReviewText(report);await retainDraft("reviewSettings",report);}
+    try{const {result}=await streamRequest({kind:"reviewSettings",...model,projectId:project.id,title:project.title,summary:project.summary,story_bible:project.story_bible,genre:project.genre,style:project.style,chapters,instruction:fieldInstruction});const report=result?.text||"";if(!report.trim())throw new Error("模型没有返回检查结果");setReviewText(report);await retainDraft("reviewSettings",report);}
     catch(e){if(streamingRef.current)setReviewText(streamingRef.current);toast.error(e instanceof Error?e.message:"检查失败");}
     finally{setReviewBusy(false);generationAbort.current=null;}
   }
@@ -206,28 +177,32 @@ export default function Home() {
     if((!project&&!draft)||fieldBusy)return;
     if(!model.endpoint||!model.model){toast.error("请先配置模型");return;}
     setFieldBusy(field);setFieldBusyDraft(draft);setFieldProposal(null);
+    const source=draft?{title:draftTitle,summary:draftSummary,story_bible:draftStoryBible,genre:"",style:""}:project!;
+    const selected=field==="story_bible"&&operation!=="generate"&&bibleSelection.text&&source.story_bible.slice(bibleSelection.start,bibleSelection.end)===bibleSelection.text?bibleSelection:null;
     try{
-      const source=draft
-        ? {title:draftTitle,premise:draftPremise,summary:draftSummary,mainline:"",important_notes:draftImportantNotes,genre:"",style:""}
-        : project!;
-      const {result}=await streamRequest({kind:"projectField",field,operation,...model,projectId:draft?undefined:project?.id,title:source.title,premise:source.premise,summary:source.summary,mainline:source.mainline,important_notes:source.important_notes,genre:source.genre,style:source.style,chapters:draft?[]:chapters,instruction:fieldInstruction});
+      const {result}=await streamRequest({kind:"projectField",field,operation,...model,projectId:draft?undefined:project?.id,title:source.title,summary:source.summary,story_bible:source.story_bible,genre:source.genre,style:source.style,chapters:draft?[]:chapters,instruction:fieldInstruction,fieldSelection:selected?.text||""});
       if(!result?.text?.trim())throw new Error("模型没有返回内容");
-      setFieldProposal({field,text:result.text.trim(),draft});
-      if(!draft)await retainDraft(field,result.text);
-    }catch(e){if(streamingRef.current){setFieldProposal({field,text:streamingRef.current,draft});if(!draft)await retainDraft(field,streamingRef.current);}toast.error(e instanceof Error?e.message:"生成中断，已保留收到的内容");}
+      const next={field,text:result.text.trim(),draft,selectionStart:selected?.start,selectionEnd:selected?.end,baseText:field==="story_bible"?source.story_bible:undefined};
+      setFieldProposal(next);
+      if(!draft)await retainDraft(field,JSON.stringify(next));
+    }catch(e){if(streamingRef.current){const partial={field,text:streamingRef.current,draft,selectionStart:selected?.start,selectionEnd:selected?.end,baseText:field==="story_bible"?source.story_bible:undefined};setFieldProposal(partial);if(!draft)await retainDraft(field,JSON.stringify(partial));}toast.error(e instanceof Error?e.message:"生成中断，已保留收到的内容");}
     finally{setFieldBusy(null);generationAbort.current=null;}
   }
   async function acceptProjectField(){
     if(!fieldProposal)return;
     if(fieldProposal.draft){
       if(fieldProposal.field==="summary")setDraftSummary(fieldProposal.text);
-      else setDraftImportantNotes(fieldProposal.text);
+      else setDraftStoryBible(fieldProposal.selectionStart!==undefined&&fieldProposal.baseText!==undefined?fieldProposal.baseText.slice(0,fieldProposal.selectionStart)+fieldProposal.text+fieldProposal.baseText.slice(fieldProposal.selectionEnd):fieldProposal.text);
       setFieldProposal(null);
       toast.success("已采用草稿，创建作品后保存");
       return;
     }
     if(!project)return;
-    const next={...project,[fieldProposal.field]:fieldProposal.text};
+    if(fieldProposal.field==="story_bible"&&fieldProposal.baseText!==undefined&&project.story_bible!==fieldProposal.baseText){toast.error("故事资料已经修改，请重新生成草稿");return;}
+    const value=fieldProposal.selectionStart!==undefined&&fieldProposal.selectionEnd!==undefined&&fieldProposal.baseText!==undefined
+      ?fieldProposal.baseText.slice(0,fieldProposal.selectionStart)+fieldProposal.text+fieldProposal.baseText.slice(fieldProposal.selectionEnd)
+      :fieldProposal.text;
+    const next={...project,[fieldProposal.field]:value};
     setFieldBusy(fieldProposal.field);
     try{
       await post("updateProject",next);
@@ -239,13 +214,13 @@ export default function Home() {
     finally{setFieldBusy(null);}
   }
   function projectFieldActions(field:ProjectField,draft=false){
-    const value=draft?(field==="summary"?draftSummary:draftImportantNotes):(project?.[field]||"");
-    const label=field==="summary"?"小说概要":field==="mainline"?"故事主线":"重要提示";
+    const value=draft?(field==="summary"?draftSummary:draftStoryBible):(project?.[field]||"");
+    const label=field==="summary"?"小说概要":"故事资料";
     return <div className="field-ai"><div className="field-ai-actions">
-      <Button variant="outline" size="sm" disabled={!!fieldBusy||false} onClick={()=>void generateProjectField(field,"generate",draft)}><Sparkles size={14}/>{fieldBusy===field?"生成中…":"AI 生成"}</Button>
-      <Button variant="outline" size="sm" disabled={!!fieldBusy||!value.trim()||false} onClick={()=>void generateProjectField(field,"expand",draft)}>扩写</Button>
-      <Button variant="outline" size="sm" disabled={!!fieldBusy||!value.trim()||false} onClick={()=>void generateProjectField(field,"rewrite",draft)}>重写</Button>
-    </div>{fieldBusy===field&&fieldBusyDraft===draft&&<div className="field-preview"><strong>AI 正在写作</strong><p ref={fieldStreamBox} onScroll={e=>{const el=e.currentTarget;followStream.current=el.scrollHeight-el.scrollTop-el.clientHeight<48;}} className={skipAnimation?"":"typing-output"} aria-live="polite">{streaming||"正在连接模型…"}</p><div className="field-preview-actions"><Button variant="outline" size="sm" onClick={stopGeneration}>停止生成</Button><Button variant="ghost" size="sm" onClick={()=>setSkipAnimation(!skipAnimation)}>{skipAnimation?"启用动画":"关闭动画"}</Button></div></div>}{fieldProposal?.field===field&&fieldProposal.draft===draft&&<div className="field-preview"><strong>{label}草稿</strong><p>{fieldProposal.text}</p><div className="field-preview-actions"><Button variant="outline" size="sm" onClick={()=>setFieldProposal(null)}>舍弃</Button><Button size="sm" disabled={!!fieldBusy||false} onClick={()=>void acceptProjectField()}>{draft?"采用草稿":"采用并保存"}</Button></div></div>}</div>;
+      <Button variant="outline" size="sm" disabled={!!fieldBusy} onClick={()=>void generateProjectField(field,"generate",draft)}><Sparkles size={14}/>{fieldBusy===field?"生成中…":"AI 生成"}</Button>
+      <Button variant="outline" size="sm" disabled={!!fieldBusy||!value.trim()} onClick={()=>void generateProjectField(field,"expand",draft)}>扩写{field==="story_bible"&&bibleSelection.text?"选中段落":""}</Button>
+      <Button variant="outline" size="sm" disabled={!!fieldBusy||!value.trim()} onClick={()=>void generateProjectField(field,"rewrite",draft)}>重写{field==="story_bible"&&bibleSelection.text?"选中段落":""}</Button>
+    </div>{fieldBusy===field&&fieldBusyDraft===draft&&<div className="field-preview"><strong>AI 正在写作</strong><p ref={fieldStreamBox} onScroll={e=>{const el=e.currentTarget;followStream.current=el.scrollHeight-el.scrollTop-el.clientHeight<48;}} className={skipAnimation?"":"typing-output"} aria-live="polite">{streaming||"正在连接模型…"}</p><div className="field-preview-actions"><Button variant="outline" size="sm" onClick={stopGeneration}>停止生成</Button><Button variant="ghost" size="sm" onClick={()=>setSkipAnimation(!skipAnimation)}>{skipAnimation?"启用动画":"关闭动画"}</Button></div></div>}{fieldProposal?.field===field&&fieldProposal.draft===draft&&<div className="field-preview"><strong>{label}草稿{fieldProposal.selectionStart!==undefined?" · 仅替换选中段落":""}</strong><p>{fieldProposal.text}</p><div className="field-preview-actions"><Button variant="outline" size="sm" onClick={()=>setFieldProposal(null)}>舍弃</Button><Button size="sm" disabled={!!fieldBusy} onClick={()=>void acceptProjectField()}>{draft?"采用草稿":"采用并保存"}</Button></div></div>}</div>;
   }
   async function addChapter(title="新章节",synopsis=""){
     if(!project||addChapterPending.current)return null;
@@ -303,7 +278,7 @@ export default function Home() {
       const afterChapterId=insertAfterId==="__start__"?"":insertAfterId;
       if(kind==="insert"&&afterChapterId&&!chapters.some(c=>c.id===afterChapterId))throw new Error("插入位置已变化，请重新选择");
       const insertionOffset=bodyCursor===null?chapter?.body.length||0:Math.max(0,Math.min(bodyCursor,chapter?.body.length||0));
-      const payload={kind,...model,projectId:project.id,title:project.title,premise:project.premise,summary:project.summary,mainline:project.mainline,important_notes:project.important_notes,genre:project.genre,style:project.style,chapters,selected:chapter,instruction,count,selection,operation:selectionOperation.current,afterChapterId,cursor:insertionOffset};
+      const payload={kind,...model,projectId:project.id,title:project.title,summary:project.summary,story_bible:project.story_bible,genre:project.genre,style:project.style,chapters,selected:chapter,instruction,count,selection,operation:selectionOperation.current,afterChapterId,cursor:insertionOffset};
       const {result}=await streamRequest(payload);
       if(!result)throw new Error("生成中断");
       if(kind==="test")toast.success("连接成功");
@@ -346,7 +321,7 @@ export default function Home() {
   }
   function exportBook(){
     if(!project)return;
-    const content=`# ${project.title}\n\n## 小说概要\n\n${project.summary || ""}\n\n## 故事主线\n\n${project.mainline || ""}\n\n## 人物设定\n\n${characters.filter(c=>c.project_id===project.id).map(c=>`### ${c.name} · ${c.role}\n目标：${c.goal}\n性格：${c.traits}\n关系：${c.relationships}\n秘密：${c.secret}\n成长：${c.arc}`).join("\n\n")}\n\n## 重要提示\n\n${project.important_notes || ""}\n\n## 世界设定与核心冲突\n\n${project.premise}\n\n`+chapters.map((c,i)=>`## 第${i+1}章 ${c.title}\n\n> ${c.synopsis}\n\n${c.body||""}\n`).join("\n");
+    const content=`# ${project.title}\n\n## 小说概要\n\n${project.summary||""}\n\n## 故事资料\n\n${project.story_bible||""}\n\n`+chapters.map((c,i)=>`## 第${i+1}章 ${c.title}\n\n> ${c.synopsis}\n\n${c.body||""}\n`).join("\n");
     const blob=new Blob([content],{type:"text/markdown;charset=utf-8"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`${project.title.replace(/[\\/:*?"<>|]/g,"_")}.md`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
   useEffect(()=>{
@@ -359,13 +334,29 @@ export default function Home() {
 
   return <div className="app-shell"><Toaster richColors position="top-center" />
     <header className="topbar"><div className="brand"><div className="brand-mark"><BookOpen size={19}/></div><span>纸间</span><span className="brand-divider"/><small>小说创作工作台</small></div>
-      <div className="project-switcher"><label htmlFor="project-select">作品集</label><select id="project-select" aria-label="选择作品" value={projectId} onChange={e=>void switchProject(e.target.value)}><option value="" disabled>选择作品</option>{projects.map(p=><option key={p.id} value={p.id}>{p.title}</option>)}</select><Dialog open={newOpen} onOpenChange={setNewOpen}><button className="icon-button" aria-label="新建作品" title="新建作品" onClick={()=>setNewOpen(true)}><Plus size={18}/></button><DialogContent className="settings-dialog"><DialogHeader><DialogTitle>新建小说</DialogTitle></DialogHeader><div className="field"><Label htmlFor="new-title">书名</Label><Input id="new-title" value={draftTitle} onChange={e=>setDraftTitle(e.target.value)} placeholder="为故事起一个名字"/></div><div className="field"><Label htmlFor="new-ai-instruction">AI 修改要求（可选）</Label><Textarea id="new-ai-instruction" rows={2} value={fieldInstruction} onChange={e=>setFieldInstruction(e.target.value)} placeholder="例如：悬疑风格、节奏紧凑……"/></div><div className="field"><Label htmlFor="new-summary">小说概要</Label><Textarea id="new-summary" value={draftSummary} onChange={e=>setDraftSummary(e.target.value)} placeholder="这本小说讲述什么故事？" rows={3}/></div>{projectFieldActions("summary",true)}<div className="field"><Label htmlFor="new-premise">世界设定与核心冲突</Label><Textarea id="new-premise" value={draftPremise} onChange={e=>setDraftPremise(e.target.value)} placeholder="主角、世界、核心冲突……" rows={3}/></div><div className="field"><Label htmlFor="new-notes">重要提示</Label><Textarea id="new-notes" value={draftImportantNotes} onChange={e=>setDraftImportantNotes(e.target.value)} placeholder="必须遵守的禁忌、硬性要求和写作偏好……" rows={3}/></div>{projectFieldActions("important_notes",true)}<div className="dialog-actions"><Button onClick={()=>void createProject()}>创建作品</Button></div></DialogContent></Dialog></div>
+      <div className="project-switcher"><label htmlFor="project-select">作品集</label><select id="project-select" aria-label="选择作品" value={projectId} onChange={e=>void switchProject(e.target.value)}><option value="" disabled>选择作品</option>{projects.map(p=><option key={p.id} value={p.id}>{p.title}</option>)}</select><Dialog open={newOpen} onOpenChange={setNewOpen}><button className="icon-button" aria-label="新建作品" title="新建作品" onClick={()=>setNewOpen(true)}><Plus size={18}/></button><DialogContent className="settings-dialog character-dialog"><DialogHeader><DialogTitle>新建小说</DialogTitle></DialogHeader>
+        <div className="field"><Label htmlFor="new-title">书名</Label><Input id="new-title" value={draftTitle} onChange={e=>setDraftTitle(e.target.value)} placeholder="为故事起一个名字"/></div>
+        <div className="field"><Label htmlFor="new-summary">小说概要</Label><Textarea id="new-summary" value={draftSummary} onChange={e=>setDraftSummary(e.target.value)} placeholder="这本小说讲述什么故事？" rows={3}/></div>{projectFieldActions("summary",true)}
+        <div className="field"><Label htmlFor="new-bible">故事资料（可选）</Label><Textarea id="new-bible" className="story-bible-editor" rows={12} value={draftStoryBible} onSelect={e=>{const el=e.currentTarget;setBibleSelection({start:el.selectionStart,end:el.selectionEnd,text:el.value.slice(el.selectionStart,el.selectionEnd)});}} onChange={e=>{setDraftStoryBible(e.target.value);setBibleSelection({start:0,end:0,text:""});}} placeholder="用 # 主线、# 人物等标签自由记录故事设定……"/></div>
+        {!draftStoryBible.trim()&&<Button variant="outline" size="sm" onClick={()=>setDraftStoryBible(storyTemplate)}>插入默认模板</Button>}{projectFieldActions("story_bible",true)}
+        <div className="dialog-actions"><Button onClick={()=>void createProject()}>创建作品</Button></div></DialogContent></Dialog></div>
       <div className="top-actions"><span className="save-state">{saveError?"保存失败 · 草稿已暂存":projectDirty?"设定待保存":saving?"保存中…":Object.keys(pendingPatch.current).length?"待保存":"已保存"}</span>{saveError&&<Button variant="outline" size="sm" onClick={async()=>{for(const id of Object.keys(pendingPatch.current))await flushChapter(id);if(projectDirty&&project)await saveProject(project);}}>重试保存</Button>}<Button variant="ghost" size="sm" onClick={exportBook} disabled={!project}><Download size={16}/> 导出</Button>
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}><Button variant="outline" size="sm" onClick={()=>setSettingsOpen(true)}><Settings2 size={16}/> 模型配置</Button><DialogContent className="settings-dialog"><DialogHeader><DialogTitle>自定义模型</DialogTitle></DialogHeader><p className="dialog-note">已配置 DeepSeek 默认模型。切换到其他兼容接口时，可在下方填写地址、模型和密钥；自定义密钥只在当前页面使用。</p><div className="field"><Label htmlFor="endpoint">接口地址</Label><Input id="endpoint" placeholder="https://example.com/v1/chat/completions" value={model.endpoint} onChange={e=>setModel({...model,endpoint:e.target.value})}/></div><div className="field"><Label htmlFor="model">模型名称</Label><Input id="model" placeholder="填写服务商提供的模型 ID" value={model.model} onChange={e=>setModel({...model,model:e.target.value})}/></div><div className="field"><Label htmlFor="key">API 密钥</Label><Input id="key" type="password" autoComplete="off" placeholder="默认 DeepSeek 留空；自定义模型请填写" value={model.key} onChange={e=>setModel({...model,key:e.target.value})}/></div><div className="field"><Label htmlFor="temp">创造性 · {model.temperature.toFixed(1)}</Label><input id="temp" type="range" min="0" max="1.5" step="0.1" value={model.temperature} onChange={e=>setModel({...model,temperature:Number(e.target.value)})}/></div><div className="dialog-actions"><Button variant="outline" onClick={()=>void generate("test")} disabled={busy||!project}>测试连接</Button><Button onClick={()=>setSettingsOpen(false)}>完成</Button></div></DialogContent></Dialog>
       </div></header>
     <Dialog open={showHistory} onOpenChange={setShowHistory}><DialogContent className="settings-dialog"><DialogHeader><DialogTitle>版本与生成草稿</DialogTitle></DialogHeader>
       <h3 className="history-heading">可恢复版本</h3>{snapshots.filter(s=>s.project_id===projectId).map(s=><div className="history-item" key={s.id}><span>{s.reason}<small>{new Date(s.created_at).toLocaleString("zh-CN")}</small></span><Button variant="outline" size="sm" onClick={async()=>{if(!window.confirm("将整部作品恢复到这个版本？当前状态会先自动备份。"))return;if(!await flushAllChapters())return;await post("restoreSnapshot",{id:s.id});await load();setChapterId("");setShowHistory(false);toast.success("已恢复版本");}}>恢复</Button></div>)}
-      <h3 className="history-heading">近期 AI 草稿</h3>{drafts.filter(d=>d.project_id===projectId).map(d=><div className="history-item" key={d.id}><span>{d.kind}<small>{new Date(d.created_at).toLocaleString("zh-CN")}</small></span><Button variant="outline" size="sm" onClick={()=>{if(d.kind==="character"){try{editCharacter(characters.find(c=>c.id===d.target_id));setCharacterProposal(JSON.parse(d.content) as CharacterDraft);setSettingsSection("characters");setStoryOpen(true);}catch{toast.error("这份人物草稿格式不完整");}}else if(d.kind==="reviewSettings"){setReviewText(d.content);setStoryOpen(true);}else if(d.kind==="summary"||d.kind==="mainline"||d.kind==="important_notes"){setFieldProposal({field:d.kind,text:d.content,draft:false});setStoryOpen(true);}else{let cs;try{cs=JSON.parse(d.content);}catch{}if(d.kind==="selection"&&cs&&typeof cs==="object"&&!Array.isArray(cs)){setSelectionStart(cs.start||0);setSelectionEnd(cs.end||0);setProposal({kind:"selection",target:d.target_id||undefined,text:cs.text,selection:cs.selection});}else if(["continue","bodyRewrite","insert"].includes(d.kind)&&cs&&typeof cs==="object"&&!Array.isArray(cs)){setProposal({kind:d.kind as Proposal["kind"],target:d.target_id||undefined,text:cs.text,chapters:cs.chapters,afterChapterId:cs.afterChapterId,insertionOffset:cs.insertionOffset,baseBody:cs.baseBody});}else setProposal({kind:d.kind as Proposal["kind"],target:d.target_id||undefined,text:Array.isArray(cs)?undefined:d.content,chapters:Array.isArray(cs)?cs:undefined});}setShowHistory(false);}}>查看</Button></div>)}
+      <h3 className="history-heading">近期 AI 草稿</h3>{drafts.filter(d=>d.project_id===projectId).map(d=><div className="history-item" key={d.id}><span>{d.kind}<small>{new Date(d.created_at).toLocaleString("zh-CN")}</small></span><Button variant="outline" size="sm" onClick={()=>{
+        if(d.kind==="reviewSettings"){setReviewText(d.content);setStoryOpen(true);}
+        else if(d.kind==="summary"||d.kind==="story_bible"){
+          let saved:FieldProposal|undefined;try{const parsed=JSON.parse(d.content) as FieldProposal;if(parsed?.field===d.kind&&typeof parsed.text==="string")saved=parsed;}catch{}
+          setFieldProposal(saved||{field:d.kind,text:d.content,draft:false});setStoryOpen(true);
+        }else{let cs;try{cs=JSON.parse(d.content);}catch{}
+          if(d.kind==="selection"&&cs&&typeof cs==="object"&&!Array.isArray(cs)){setSelectionStart(cs.start||0);setSelectionEnd(cs.end||0);setProposal({kind:"selection",target:d.target_id||undefined,text:cs.text,selection:cs.selection});}
+          else if(["continue","bodyRewrite","insert"].includes(d.kind)&&cs&&typeof cs==="object"&&!Array.isArray(cs)){setProposal({kind:d.kind as Proposal["kind"],target:d.target_id||undefined,text:cs.text,chapters:cs.chapters,afterChapterId:cs.afterChapterId,insertionOffset:cs.insertionOffset,baseBody:cs.baseBody});}
+          else if(["outline","append","rewrite","body","memory"].includes(d.kind))setProposal({kind:d.kind as Proposal["kind"],target:d.target_id||undefined,text:Array.isArray(cs)?undefined:d.content,chapters:Array.isArray(cs)?cs:undefined});
+          else toast("旧格式草稿可在此前的版本中查看");
+        }setShowHistory(false);
+      }}>查看</Button></div>)}
     </DialogContent></Dialog>
     <div className="workspace">
       <aside className={`sidebar ${sidebar?"":"sidebar-closed"}`}><div className="sidebar-head"><span className="eyebrow">章节目录 <b>{chapters.length}</b></span>{project&&<button className="icon-button" aria-label="添加章节" title="添加章节" disabled={false||addingChapter} onClick={()=>void addChapter()}><Plus size={17}/></button>}</div>
@@ -373,33 +364,28 @@ export default function Home() {
         {project&&<><div className="chapter-list">{chapters.map((c,i)=><button key={c.id} className={`chapter-item ${c.id===chapterId?"selected":""}`} onClick={async()=>{if(busy||fieldBusy){toast("请先停止当前生成");return;}if(chapterId&&!await flushChapter(chapterId))return;setChapterId(c.id);setProposal(null);setSelection("");}}><span className="chapter-number">{String(i+1).padStart(2,"0")}</span><span className="chapter-name">{c.title}</span>{c.body&&<span className="written-dot" title="已有正文"/>}</button>)}{!chapters.length&&<p className="side-empty">生成大纲或手动添加章节</p>}</div><button className="sidebar-add" disabled={false||addingChapter} onClick={()=>void addChapter()}><Plus size={16}/> 添加章节</button></>}{!project&&!loading&&<p className="side-empty">从顶部选择或新建作品</p>}
         <div className="sidebar-bottom"><span>让故事从一页开始。</span></div>
       </aside>
-      <main className="main-area"><div className="main-top"><button className="icon-button sidebar-toggle" title="展开或收起目录" aria-label="展开或收起目录" onClick={()=>setSidebar(!sidebar)}>{sidebar?<PanelLeftClose size={18}/>:<PanelLeftOpen size={18}/>}</button><div className="breadcrumb">{project?.title||"新作品"}<span>/</span>{chapter?chapter.title:"大纲"}</div>{project&&<><Button variant="ghost" size="sm" onClick={()=>setShowHistory(true)}>版本</Button></>}{project&&<Dialog open={storyOpen} onOpenChange={async open=>{if(!open&&projectDirty){if(!await saveProject(project||{}))return;}setStoryOpen(open);}}><Button variant="ghost" size="sm" onClick={()=>{setSettingsSection("book");setStoryOpen(true);}}>作品设定 <ArrowRight size={14}/></Button><DialogContent className="settings-dialog character-dialog"><DialogHeader><DialogTitle>作品设定</DialogTitle></DialogHeader><div className="settings-nav">{([ ["book","基础与主线"],["characters","人物"],["cards","其他设定"] ] as const).map(([key,label])=><button key={key} className={settingsSection===key?"active":""} onClick={()=>setSettingsSection(key)}>{label}</button>)}</div>{settingsSection==="book"&&<><h3 className="history-heading">基础信息</h3><div className="field"><Label htmlFor="story-title">书名</Label><Input id="story-title" value={project.title} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,title:e.target.value}:p));}}/></div><div className="field"><Label htmlFor="story-genre">题材</Label><Input id="story-genre" value={project.genre} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,genre:e.target.value}:p));}} placeholder="悬疑、科幻、奇幻……"/></div><div className="field"><Label htmlFor="field-instruction">AI 修改要求（可选）</Label><Textarea id="field-instruction" rows={2} value={fieldInstruction} onChange={e=>setFieldInstruction(e.target.value)} placeholder="例如：突出主角的成长；保持悬疑氛围……"/></div><div className="field"><Label htmlFor="story-summary">小说概要</Label><Textarea id="story-summary" rows={5} value={project.summary} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,summary:e.target.value}:p));}} placeholder="概括故事主线、主要人物和发展方向……"/></div>{projectFieldActions("summary")}<h3 className="history-heading">故事主线</h3><p className="dialog-note">写明目标、阻碍、关键转折、高潮与结局方向；未决定的情节可以留白。</p><div className="field"><Label htmlFor="story-mainline">主线规划</Label><Textarea id="story-mainline" rows={7} value={project.mainline||""} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,mainline:e.target.value}:p));}} placeholder="起点与目标：…
-核心阻碍：…
-阶段转折：…
-高潮：…
-结局方向：…"/></div>{projectFieldActions("mainline")}<div className="field-ai-actions"><Button variant="outline" size="sm" disabled={reviewBusy||false} onClick={()=>void reviewSettings()}>{reviewBusy?"检查中…":"AI 检查主线与章节冲突"}</Button></div>{reviewBusy&&<div className="field-preview"><strong>正在检查</strong><p className={skipAnimation?"":"typing-output"}>{streaming||"正在连接模型…"}</p><Button size="sm" variant="outline" onClick={stopGeneration}>停止</Button></div>}{reviewText&&<div className="field-preview"><strong>冲突检查建议</strong><p>{reviewText}</p><Button size="sm" variant="outline" onClick={()=>setReviewText("")}>关闭</Button></div>}<h3 className="history-heading">世界与写作约束</h3><div className="field"><Label htmlFor="story-premise">世界设定与核心冲突</Label><Textarea id="story-premise" rows={5} value={project.premise} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,premise:e.target.value}:p));}}/></div><div className="field"><Label htmlFor="story-notes">重要提示</Label><Textarea id="story-notes" rows={5} value={project.important_notes} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,important_notes:e.target.value}:p));}} placeholder="禁忌、硬性要求与写作偏好；人物请在人物设定中管理……"/></div>{projectFieldActions("important_notes")}<div className="field"><Label htmlFor="story-style">文风</Label><Textarea id="story-style" rows={3} value={project.style} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,style:e.target.value}:p));}} placeholder="例如：克制、细腻、第三人称……"/></div><div className="dialog-actions"><Button variant="destructive" onClick={async()=>{if(!window.confirm("将整部作品移出工作台？作品、章节和正文会保留；恢复入口稍后提供。"))return;if(!await flushAllChapters())return;if(projectDirty&&!await saveProject(project))return;await post("deleteProject",{id:project.id});setStoryOpen(false);setProjectId("");await load();}}>删除作品</Button><Button onClick={async()=>{if(await saveProject(project))setStoryOpen(false);}}>保存设定</Button></div></>}{settingsSection==="characters"&&<><p className="dialog-note">每个人物的目标、关系和成长独立管理。修改后已有正文会提示复核，不会自动改写。</p>
-      <div className="character-list">{characters.filter(c=>c.project_id===projectId).map(c=><button key={c.id} className={`character-item ${characterId===c.id?"active":""}`} onClick={()=>editCharacter(c)}>{c.name}<small>{c.role||"未设身份"}</small></button>)}<button className="character-item" onClick={()=>editCharacter()}><Plus size={15}/> 新人物</button></div>
-      {cards.filter(c=>c.project_id===projectId&&c.category==="character").map(c=><div className="legacy-character" key={c.id}><span>旧人物卡：{c.content.slice(0,70)}</span><Button size="sm" variant="outline" onClick={async()=>{try{const result=await post("convertCharacter",{id:c.id});await load();setCharacterId(result.id);setCharacterDraft({...blankCharacter,name:c.content.split(/[：:\n]/)[0]||"待命名人物",traits:c.content});setCharacterFrom(c.from_chapter?String(c.from_chapter):"");setCharacterUntil(c.until_chapter?String(c.until_chapter):"");toast.success("已转换，原内容保存在性格栏，可继续整理");}catch(e){toast.error(e instanceof Error?e.message:"转换失败");}}}>转换为人物设定</Button></div>)}
-      <div className="character-editor"><div className="field"><Label htmlFor="character-name">姓名</Label><Input id="character-name" value={characterDraft.name} onChange={e=>setCharacterDraft({...characterDraft,name:e.target.value})}/></div><div className="field"><Label htmlFor="character-role">身份／作用</Label><Input id="character-role" value={characterDraft.role} onChange={e=>setCharacterDraft({...characterDraft,role:e.target.value})} placeholder="主角、对手、盟友……"/></div>
-      {([ ["goal","目标与动机"],["traits","性格与弱点"],["relationships","人物关系"],["secret","秘密／尚未揭露的信息"],["arc","成长弧线"] ] as const).map(([key,label])=><div className="field" key={key}><Label htmlFor={`character-${key}`}>{label}</Label><Textarea id={`character-${key}`} rows={2} value={characterDraft[key]} onChange={e=>setCharacterDraft({...characterDraft,[key]:e.target.value})}/></div>)}
-      <div className="card-range"><div className="field"><Label htmlFor="character-from">首次出现章（可选）</Label><Input id="character-from" type="number" min={1} value={characterFrom} onChange={e=>setCharacterFrom(e.target.value)}/></div><div className="field"><Label htmlFor="character-until">适用至第几章（可选）</Label><Input id="character-until" type="number" min={1} value={characterUntil} onChange={e=>setCharacterUntil(e.target.value)}/></div></div>
-      <div className="field"><Label htmlFor="character-instruction">AI 修改要求</Label><Textarea id="character-instruction" rows={2} value={fieldInstruction} onChange={e=>setFieldInstruction(e.target.value)} placeholder="例如：强化主角对失眠后果的愧疚"/></div><div className="field-ai-actions"><Button variant="outline" size="sm" disabled={characterBusy} onClick={()=>void generateCharacter("generate")}>AI 生成</Button><Button variant="outline" size="sm" disabled={characterBusy||!characterDraft.name.trim()} onClick={()=>void generateCharacter("expand")}>扩写</Button><Button variant="outline" size="sm" disabled={characterBusy||!characterDraft.name.trim()} onClick={()=>void generateCharacter("rewrite")}>重写</Button></div>
-      {characterBusy&&<div className="field-preview"><strong>AI 正在写作</strong><p className={skipAnimation?"":"typing-output"} aria-live="polite">{streaming||"正在连接模型…"}</p><Button variant="outline" size="sm" onClick={stopGeneration}>停止生成</Button></div>}
-      {characterProposal&&<div className="field-preview"><strong>人物草稿 · {characterProposal.name}</strong><p>{`身份：${characterProposal.role}\n目标：${characterProposal.goal}\n性格：${characterProposal.traits}\n关系：${characterProposal.relationships}\n秘密：${characterProposal.secret}\n成长：${characterProposal.arc}`}</p><div className="field-preview-actions"><Button variant="outline" size="sm" onClick={()=>setCharacterProposal(null)}>舍弃</Button><Button size="sm" onClick={()=>void saveCharacterData(characterProposal)}>采用并保存</Button></div></div>}
-      <div className="dialog-actions">{characterId&&<Button variant="destructive" onClick={async()=>{if(!window.confirm("删除这张人物卡？可以通过作品版本恢复。"))return;try{await post("deleteCharacter",{id:characterId});await load();editCharacter();}catch(e){toast.error(e instanceof Error?e.message:"删除失败");}}}>删除人物</Button>}<Button onClick={()=>void saveCharacterData(characterDraft)}>保存人物</Button></div></div></>}{settingsSection==="cards"&&<><p className="dialog-note">将规则、时间线、伏笔与禁忌分开记录。限定章节的规则只会在适用章节的生成请求中使用。</p>
-      <div className="card-list">{cards.filter(c=>c.project_id===projectId).map(c=><div className="story-card" key={c.id}><div><label className="card-check"><input type="checkbox" checked={!!c.done} onChange={async e=>{await post("markLoreCard",{id:c.id,done:e.target.checked});await load();}}/> 已核对</label><strong>{({rule:"规则",character:"人物",timeline:"时间线",foreshadow:"伏笔",ban:"禁忌"} as Record<string,string>)[c.category]||c.category}</strong><small>{c.from_chapter?`第${c.from_chapter}章${c.until_chapter?`—${c.until_chapter}章`:"起"}`:"全书"}</small></div><p>{c.content}</p><Button variant="ghost" size="sm" onClick={()=>{setEditingCardId(c.id);setCardCategory(c.category);setCardText(c.content);setCardFrom(c.from_chapter?String(c.from_chapter):"");setCardUntil(c.until_chapter?String(c.until_chapter):"");}}>编辑</Button><Button variant="ghost" size="sm" onClick={async()=>{if(!window.confirm("删除这张设定卡？"))return;await post("deleteLoreCard",{id:c.id});await load();}}>删除</Button></div>)}</div>
-      <div className="field"><Label>类型</Label><select value={cardCategory} onChange={e=>setCardCategory(e.target.value)}><option value="rule">规则</option><option value="character" disabled>旧人物卡（请在人物设定中管理）</option><option value="timeline">时间线</option><option value="foreshadow">伏笔</option><option value="ban">禁忌</option></select></div>
-      <div className="field"><Label>设定内容</Label><Textarea value={cardText} onChange={e=>setCardText(e.target.value)} rows={3} placeholder="例如：第4章之前不得揭示林晚的身份"/></div>
-      <div className="card-range"><div className="field"><Label>起始章（可选）</Label><Input type="number" min="1" value={cardFrom} onChange={e=>setCardFrom(e.target.value)}/></div><div className="field"><Label>结束章（可选）</Label><Input type="number" min="1" value={cardUntil} onChange={e=>setCardUntil(e.target.value)}/></div></div>
-      <div className="dialog-actions"><Button onClick={()=>void saveCard()} disabled={!cardText.trim()}>{editingCardId?"保存修改":"添加设定卡"}</Button>{editingCardId&&<Button variant="ghost" onClick={()=>{setEditingCardId("");setCardText("");setCardFrom("");setCardUntil("");}}>取消编辑</Button>}</div></>}</DialogContent></Dialog>}</div>
+      <main className="main-area"><div className="main-top"><button className="icon-button sidebar-toggle" title="展开或收起目录" aria-label="展开或收起目录" onClick={()=>setSidebar(!sidebar)}>{sidebar?<PanelLeftClose size={18}/>:<PanelLeftOpen size={18}/>}</button><div className="breadcrumb">{project?.title||"新作品"}<span>/</span>{chapter?chapter.title:"大纲"}</div>{project&&<><Button variant="ghost" size="sm" onClick={()=>setShowHistory(true)}>版本</Button></>}{project&&<Dialog open={storyOpen} onOpenChange={async open=>{if(!open&&projectDirty){if(!await saveProject(project||{}))return;}setStoryOpen(open);}}><Button variant="ghost" size="sm" onClick={()=>{setStoryOpen(true);}}>作品设定 <ArrowRight size={14}/></Button><DialogContent className="settings-dialog character-dialog"><DialogHeader><DialogTitle>作品设定</DialogTitle></DialogHeader>
+        <div className="field"><Label htmlFor="story-title">书名</Label><Input id="story-title" value={project.title} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,title:e.target.value}:p));}}/></div>
+        <div className="field"><Label htmlFor="story-genre">题材</Label><Input id="story-genre" value={project.genre} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,genre:e.target.value}:p));}} placeholder="悬疑、科幻、奇幻……"/></div>
+        <div className="field"><Label htmlFor="story-summary">小说概要</Label><Textarea id="story-summary" rows={4} value={project.summary} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,summary:e.target.value}:p));}} placeholder="概括故事主线、人物和吸引读者的悬念……"/></div>{projectFieldActions("summary")}
+        <div className="field"><Label htmlFor="story-style">文风</Label><Textarea id="story-style" rows={2} value={project.style} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,style:e.target.value}:p));}} placeholder="例如：克制、细腻、第三人称……"/></div>
+        <h3 className="history-heading">故事资料</h3><p className="dialog-note">在同一个文本框里用 # 标题自由区分主线、人物和其他设定。标签可以随时增删。</p>
+        <div className="field"><Label htmlFor="story-bible">资料正文</Label><Textarea id="story-bible" className="story-bible-editor" rows={18} value={project.story_bible||""} onSelect={e=>{const el=e.currentTarget;setBibleSelection({start:el.selectionStart,end:el.selectionEnd,text:el.value.slice(el.selectionStart,el.selectionEnd)});}} onChange={e=>{setProjectDirty(true);setBibleSelection({start:0,end:0,text:""});setProjects(items=>items.map(p=>p.id===project.id?{...p,story_bible:e.target.value}:p));}} placeholder="例如：# 故事主线\n# 人物\n# 世界与规则……"/></div>
+        {!project.story_bible?.trim()&&<Button variant="outline" size="sm" onClick={()=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,story_bible:storyTemplate}:p));}}>插入默认模板</Button>}
+        <div className="field"><Label htmlFor="field-instruction">AI 修改要求（可选）</Label><Textarea id="field-instruction" rows={2} value={fieldInstruction} onChange={e=>setFieldInstruction(e.target.value)} placeholder="例如：扩写选中的人物动机；保持悬疑氛围……"/></div>
+        <p className="model-hint">选中资料中的文字后，“扩写”和“重写”只处理该段；未选中时处理整份资料。模型单次最多读取资料前 4 万字，请把关键约束放在前面。</p>{projectFieldActions("story_bible")}
+        <div className="field-ai-actions"><Button variant="outline" size="sm" disabled={reviewBusy} onClick={()=>void reviewSettings()}>{reviewBusy?"检查中…":"AI 检查资料与章节冲突"}</Button></div>
+        {reviewBusy&&<div className="field-preview"><strong>正在检查</strong><p className={skipAnimation?"":"typing-output"}>{streaming||"正在连接模型…"}</p><Button size="sm" variant="outline" onClick={stopGeneration}>停止</Button></div>}
+        {reviewText&&<div className="field-preview"><strong>冲突检查建议</strong><p>{reviewText}</p><Button size="sm" variant="outline" onClick={()=>setReviewText("")}>关闭</Button></div>}
+        <div className="dialog-actions"><Button variant="destructive" onClick={async()=>{if(!window.confirm("将整部作品移出工作台？作品、章节和正文会保留；恢复入口稍后提供。"))return;if(!await flushAllChapters())return;if(projectDirty&&!await saveProject(project))return;await post("deleteProject",{id:project.id});setStoryOpen(false);setProjectId("");await load();}}>删除作品</Button><Button onClick={async()=>{if(await saveProject(project))setStoryOpen(false);}}>保存设定</Button></div></DialogContent></Dialog>}</div>
         {!project? <section className="welcome"><div className="welcome-icon"><BookOpen size={32}/></div><div className="eyebrow">新的故事</div><h1>从一个念头，写到最后一章。</h1><p>先创建作品，写下故事设定。你可以生成大纲，也可以从空白章节开始。</p><Button onClick={()=>setNewOpen(true)}><Plus size={17}/> 新建小说</Button></section>:
         <><div className="editor-heading"><div><span className="eyebrow">{chapter?`第 ${chapters.findIndex(c=>c.id===chapter.id)+1} 章`:"故事蓝图"}</span><h1>{chapter?.title||project.title}</h1></div><Tabs value={mode} onValueChange={value=>{setMode(value as "outline"|"body");setProposal(null);}}><TabsList><TabsTrigger value="outline"><FileText size={16}/> 大纲</TabsTrigger><TabsTrigger value="body"><PenLine size={16}/> 正文</TabsTrigger></TabsList></Tabs></div>
         <div className="editor-scroll"><div className="editor-paper">{chapter?<>{mode==="outline"?<><div className="editor-label">章节标题</div><input className="title-input" aria-label="章节标题" value={chapter.title} onChange={e=>updateChapter(chapter.id,{title:e.target.value})} placeholder="输入章节标题"/><div className="editor-label synopsis-label">章节概述</div><textarea className="synopsis-editor" aria-label="章节概述" value={chapter.synopsis} onChange={e=>updateChapter(chapter.id,{synopsis:e.target.value})} placeholder="这一章发生什么？人物想要什么，又遇到什么阻碍？"/><div className="chapter-controls"><Button variant="ghost" size="sm" onClick={()=>void moveChapter(-1)} disabled={false||chapters.indexOf(chapter)===0}><ChevronUp size={15}/> 上移</Button><Button variant="ghost" size="sm" onClick={()=>void moveChapter(1)} disabled={false||chapters.indexOf(chapter)===chapters.length-1}><ChevronDown size={15}/> 下移</Button><Button variant="ghost" size="sm" onClick={()=>void deleteChapter()}><Trash2 size={15}/> 删除章节</Button></div></>:<><div className="body-synopsis"><span>本章概述</span><p>{chapter.synopsis||"先在大纲中写下本章概述，生成正文会更准确。"}</p></div>{chapter.body&&chapter.body_outline_revision!==null&&chapter.body_outline_revision<chapter.outline_revision&&<div className="stale-note">大纲已修改，请检查正文是否仍与当前概述一致。</div>}{!!chapter.continuity_review&&<div className="stale-note">故事设定或相邻大纲已变化，请复核本章承接、人物与时间线。<Button size="sm" variant="outline" onClick={async()=>{await post("markReviewed",{id:chapter.id});await load();}}>已复核</Button></div>}<textarea onSelect={e=>{const area=e.currentTarget;setSelectionStart(area.selectionStart);setSelectionEnd(area.selectionEnd);setBodyCursor(area.selectionEnd);setSelection(area.value.slice(area.selectionStart,area.selectionEnd));}} className="body-editor" aria-label="章节正文" value={chapter.body} onChange={e=>updateChapter(chapter.id,{body:e.target.value})} placeholder="在这里写作，或使用右侧的 AI 助手生成本章正文……"/><div className="revision-tools"><span>{selection?`已选 ${selection.length} 字`:"选中正文片段后可局部修订"}</span>{(["expand","rewrite","shorten","polish"] as const).map(op=><Button key={op} size="sm" variant="outline" disabled={!selection||busy||false} onClick={()=>{selectionOperation.current=op;void generate("selection");}}>{({expand:"扩写",rewrite:"重写",shorten:"缩写",polish:"润色"})[op]}</Button>)}</div><div className="memory-box"><Label htmlFor="chapter-memory">本章事实记忆 · 后续章节会引用</Label><Textarea id="chapter-memory" rows={3} value={chapter.memory||""} onChange={e=>updateChapter(chapter.id,{memory:e.target.value})} placeholder="本章发生了什么，哪些伏笔尚未回收？"/><Button variant="outline" size="sm" disabled={!chapter.body||busy||false} onClick={()=>void generate("memory")}>AI 整理本章记忆</Button></div></>}</>:<div className="outline-empty"><div className="empty-ornament"><Sparkles size={26}/></div><h2>故事，从大纲开始</h2><p>在右侧填写章节数并生成整部大纲，或手动添加第一章。</p><Button variant="outline" disabled={false||addingChapter} onClick={()=>void addChapter()}><Plus size={16}/> 手动添加章节</Button></div>}</div></div></>}
       </main>
-      {project&&<aside className="assistant-panel"><div className="assistant-head"><div className="assistant-symbol"><Sparkles size={17}/></div><span>创作助手</span></div><div className="assistant-content"><div className="helper-title">{mode==="outline"?"让故事继续生长":"写下这一章"}</div><p className="helper-description">{mode==="outline"?"会参考小说概要、重要提示和作品设定。生成内容会先展示，确认后才保存。":"会参考小说概要、重要提示、章节概述与前文。你可以先调整写作要求。"}</p><div className="field"><Label htmlFor="instruction">补充要求</Label><Textarea id="instruction" rows={5} placeholder={mode==="outline"?"例如：前三章增加悬念；加强女主的主动性……":"例如：突出雨夜的压迫感，多写人物之间的对话……"} value={instruction} onChange={e=>setInstruction(e.target.value)}/></div>{mode==="outline"&&<div className="field"><Label htmlFor="count">生成章节数</Label><Input id="count" type="number" min={1} max={30} value={count} onChange={e=>setCount(Number(e.target.value))}/></div>}
+      {project&&<aside className="assistant-panel"><div className="assistant-head"><div className="assistant-symbol"><Sparkles size={17}/></div><span>创作助手</span></div><div className="assistant-content"><div className="helper-title">{mode==="outline"?"让故事继续生长":"写下这一章"}</div><p className="helper-description">{mode==="outline"?"会参考小说概要与故事资料。生成内容会先展示，确认后才保存。":"会参考小说概要、故事资料、章节概述与前文。你可以先调整写作要求。"}</p><div className="field"><Label htmlFor="instruction">补充要求</Label><Textarea id="instruction" rows={5} placeholder={mode==="outline"?"例如：前三章增加悬念；加强女主的主动性……":"例如：突出雨夜的压迫感，多写人物之间的对话……"} value={instruction} onChange={e=>setInstruction(e.target.value)}/></div>{mode==="outline"&&<div className="field"><Label htmlFor="count">生成章节数</Label><Input id="count" type="number" min={1} max={30} value={count} onChange={e=>setCount(Number(e.target.value))}/></div>}
           {mode==="outline"&&<div className="field"><Label htmlFor="insert-after">AI 插入位置</Label><select id="insert-after" value={insertAfterId} onChange={e=>setInsertAfterId(e.target.value)}><option value="__start__">全书最前面</option>{chapters.map((c,i)=><option key={c.id} value={c.id}>第 {i+1} 章《{c.title}》之后</option>)}</select><p className="model-hint">插入只新增章节，已有正文保留；相邻正文会提示复核。</p></div>}
           <div className="generate-actions">{mode==="outline"?<><Button className="primary-action" disabled={busy||false} onClick={()=>void generate("outline")}><Sparkles size={16}/>{busy?"生成中…":"生成全书大纲"}</Button><div className="action-grid"><Button variant="outline" disabled={busy||!chapter||false} onClick={()=>void generate("rewrite")}><RefreshCw size={15}/> 重写本章</Button><Button variant="outline" disabled={busy||!chapters.length||false} onClick={()=>void generate("append")}><Plus size={15}/> 追加大纲</Button><Button variant="outline" disabled={busy||false} onClick={()=>void generate("insert")}><Plus size={15}/> AI 插入大纲</Button></div></>:<><Button className="primary-action" disabled={busy||!chapter||false} onClick={()=>void generate("body")}><Sparkles size={16}/>{busy?"生成中…":"生成本章正文"}</Button><div className="action-grid"><Button variant="outline" disabled={busy||!chapter?.body||false} onClick={()=>void generate("continue")}>从光标处续写</Button><Button variant="outline" disabled={busy||!chapter?.body||false} onClick={()=>void generate("bodyRewrite")}>重写整章正文</Button></div><p className="model-hint">将光标放在正文中指定位置；未放置时从章末续写。</p></>}</div><p className="model-hint">{model.model?`当前模型 · ${model.model}`:"尚未配置模型"} <button onClick={()=>setSettingsOpen(true)}>设置</button></p>
-          <p className="model-hint">默认模型每日最多 10 次／工作区、全站 30 次。本次约携带 {Math.ceil(((project.summary||"").length+(project.important_notes||"").length+(project.premise||"").length+chapters.reduce((n,c)=>n+c.synopsis.length,0))/1000)} 千字设定与大纲，长篇生成可能另有正文上下文。</p>
+          <p className="model-hint">默认模型每日最多 10 次／工作区、全站 30 次。本次约携带 {Math.ceil(((project.summary||"").length+(project.story_bible||"").length+chapters.reduce((n,c)=>n+c.synopsis.length,0))/1000)} 千字设定与大纲，长篇生成可能另有正文上下文。</p>
           {busy&&<section className="proposal"><div className="proposal-head"><span>AI 正在输出</span><button className="icon-button" onClick={stopGeneration} aria-label="停止生成"><X size={16}/></button></div><div className="proposal-scroll" ref={streamBox} onScroll={e=>{const el=e.currentTarget;followStream.current=el.scrollHeight-el.scrollTop-el.clientHeight<48;}}><p className={skipAnimation?"proposal-body":"proposal-body typing-output"} aria-live="polite">{streaming||"正在连接模型…"}</p></div><div className="proposal-buttons"><Button variant="outline" size="sm" onClick={()=>setSkipAnimation(!skipAnimation)}>{skipAnimation?"启用动画":"关闭动画"}</Button><Button variant="outline" size="sm" onClick={stopGeneration}>停止生成</Button></div></section>}
           {proposal&&<section className="proposal"><div className="proposal-head"><span>生成草稿</span><button className="icon-button" onClick={()=>setProposal(null)} aria-label="关闭草稿"><X size={16}/></button></div><div className="proposal-scroll">{proposal.kind==="insert"&&<div className="revision-before">插入在：{proposal.afterChapterId?`《${chapters.find(c=>c.id===proposal.afterChapterId)?.title||"已删除章节"}》之后`:"全书最前面"}</div>}{proposal.kind==="continue"&&<div className="revision-before">在正文第 {proposal.insertionOffset??proposal.baseBody?.length??0} 字处续写</div>}{proposal.kind==="bodyRewrite"&&<div className="revision-before"><strong>当前正文</strong><p>{proposal.baseBody}</p><strong>重写稿</strong></div>}{proposal.kind==="selection"&&proposal.selection&&<div className="revision-before"><strong>原文</strong><p>{proposal.selection}</p><strong>修订稿</strong></div>}{proposal.chapters?.map((c,i)=><div className="proposal-chapter" key={i}><strong>{c.title}</strong><p>{c.synopsis}</p></div>)}{proposal.text&&<p className="proposal-body">{proposal.text}</p>}</div><div className="proposal-buttons"><Button variant="outline" size="sm" onClick={()=>setProposal(null)}>舍弃</Button><Button size="sm" disabled={busy||(["outline","append","insert","rewrite"].includes(proposal.kind)&&!proposal.chapters?.length)||(["body","continue","bodyRewrite","selection","memory"].includes(proposal.kind)&&!proposal.text)} onClick={()=>void acceptProposal()}><Check size={15}/> 采用内容</Button></div></section>}
         </div><div className="assistant-footer"><span className="footer-line"/>你的文字始终由你决定。</div></aside>}

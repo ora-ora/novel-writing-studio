@@ -162,3 +162,4 @@ body {
 .settings-nav{display:flex;gap:6px;padding:3px;background:#edf2ed;border-radius:9px;margin:4px 0 22px}
 .settings-nav button{flex:1;border:0;background:transparent;border-radius:7px;color:#667d71;padding:9px 7px;cursor:pointer;font-size:13px;white-space:nowrap}
 .settings-nav button.active{background:#fffefa;color:#214b3d;font-weight:700;box-shadow:0 1px 4px #213b4014}
+.settings-dialog .story-bible-editor{min-height:300px;line-height:1.8;font-family:Georgia,"Songti SC","Noto Serif CJK SC",serif;font-size:15px;white-space:pre-wrap}

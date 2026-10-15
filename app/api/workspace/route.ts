@@ -6,6 +6,11 @@ type Row = Record<string, unknown>;
 const db = () => { if (!env.DB) throw new Error("Database unavailable"); return env.DB; };
 const now = () => new Date().toISOString();
 const str = (value:unknown, limit:number) => String(value ?? "").slice(0,limit);
+function previousStoryBible(project:Row,characters:Row[]=[],cards:Row[]=[]){
+  return [project.mainline&&`# 故事主线\n${project.mainline}`,project.premise&&`# 世界与核心冲突\n${project.premise}`,project.important_notes&&`# 重要提示\n${project.important_notes}`,
+    ...characters.map(c=>`# 人物\n## ${c.name}\n身份：${c.role||""}\n目标：${c.goal||""}\n性格：${c.traits||""}\n关系：${c.relationships||""}\n秘密：${c.secret||""}\n成长：${c.arc||""}`),
+    ...cards.map(c=>`# 其他设定\n## ${c.category}\n${c.content||""}`)].filter(Boolean).join("\n\n").slice(0,60000);
+}
 const fail = (message:string,status=400) => Response.json({error:message},{status});
 async function owned(projectId:string, workspaceId:string) {
   return db().prepare("SELECT * FROM projects WHERE id=? AND workspace_id=? AND deleted_at IS NULL").bind(projectId,workspaceId).first<Row>();
@@ -29,15 +34,13 @@ function insertChapter(projectId:string,c:Row,position:number) {
 export async function GET(request:Request) {
   const session=workspaceSession(request);
   try {
-    const [projects,chapters,cards,characters,snapshots,drafts]=await Promise.all([
+    const [projects,chapters,snapshots,drafts]=await Promise.all([
       db().prepare("SELECT * FROM projects WHERE workspace_id=? AND deleted_at IS NULL ORDER BY updated_at DESC").bind(session.id).all<Row>(),
       db().prepare("SELECT c.* FROM chapters c JOIN projects p ON p.id=c.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY c.position ASC").bind(session.id).all<Row>(),
-      db().prepare("SELECT l.* FROM lore_cards l JOIN projects p ON p.id=l.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY l.updated_at DESC").bind(session.id).all<Row>(),
-      db().prepare("SELECT c.* FROM characters c JOIN projects p ON p.id=c.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY c.updated_at DESC").bind(session.id).all<Row>(),
       db().prepare("SELECT s.id,s.project_id,s.reason,s.created_at FROM project_snapshots s JOIN projects p ON p.id=s.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY s.created_at DESC LIMIT 30").bind(session.id).all<Row>(),
       db().prepare("SELECT d.* FROM generation_drafts d JOIN projects p ON p.id=d.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY d.created_at DESC LIMIT 30").bind(session.id).all<Row>(),
     ]);
-    return sessionResponse({projects:projects.results,chapters:chapters.results,cards:cards.results,characters:characters.results,snapshots:snapshots.results,drafts:drafts.results},session);
+    return sessionResponse({projects:projects.results,chapters:chapters.results,snapshots:snapshots.results,drafts:drafts.results},session);
   }catch(error){console.error("workspace read",error);return fail("项目暂时无法读取，请稍后刷新。",503);}
 }
 
@@ -51,16 +54,16 @@ export async function POST(request:Request) {
     const projectId=String(data.projectId||"");
     if(action==="createProject"){
       const newId=crypto.randomUUID();
-      await db().prepare("INSERT INTO projects (id,title,premise,summary,mainline,important_notes,genre,style,updated_at,workspace_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
-        .bind(newId,str(data.title||"未命名小说",120),str(data.premise,12000),str(data.summary,8000),str(data.mainline,10000),str(data.important_notes,6000),str(data.genre,200),str(data.style,2000),now(),session.id).run();
+      await db().prepare("INSERT INTO projects (id,title,premise,summary,mainline,story_bible,important_notes,genre,style,updated_at,workspace_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(newId,str(data.title||"未命名小说",120),"",str(data.summary,8000),"",str(data.story_bible,60000),"",str(data.genre,200),str(data.style,2000),now(),session.id).run();
       return Response.json({id:newId});
     }
     if(action==="updateProject"&&id){
       if(!await owned(id,session.id))return fail("作品不存在或需要先复制到私人工作区",403);
       const previous=await owned(id,session.id);
-      const mainlineChanged=String(previous?.mainline||"")!==str(data.mainline,10000);
-      await db().batch([await snapshot(id,"修改作品设定前"),db().prepare("UPDATE projects SET title=?,premise=?,summary=?,mainline=?,important_notes=?,genre=?,style=?,updated_at=? WHERE id=? AND workspace_id=?")
-        .bind(str(data.title||"未命名小说",120),str(data.premise,12000),str(data.summary,8000),str(data.mainline,10000),str(data.important_notes,6000),str(data.genre,200),str(data.style,2000),now(),id,session.id),...(mainlineChanged?[db().prepare("UPDATE chapters SET continuity_review=1 WHERE project_id=? AND deleted_at IS NULL AND body<>''").bind(id)]:[])]);
+      const bibleChanged=String(previous?.story_bible||"")!==str(data.story_bible,60000);
+      await db().batch([await snapshot(id,"修改作品设定前"),db().prepare("UPDATE projects SET title=?,summary=?,story_bible=?,genre=?,style=?,updated_at=? WHERE id=? AND workspace_id=?")
+        .bind(str(data.title||"未命名小说",120),str(data.summary,8000),str(data.story_bible,60000),str(data.genre,200),str(data.style,2000),now(),id,session.id),...(bibleChanged?[db().prepare("UPDATE chapters SET continuity_review=1 WHERE project_id=? AND deleted_at IS NULL AND body<>''").bind(id)]:[])]);
       return Response.json({ok:true});
     }
     if(action==="snapshotProject"&&projectId){
@@ -149,8 +152,8 @@ export async function POST(request:Request) {
       const restoreProjectId=String(row.project_id);
       await db().batch([await snapshot(restoreProjectId,"恢复前备份"),db().prepare("UPDATE chapters SET deleted_at=?,updated_at=? WHERE project_id=? AND deleted_at IS NULL").bind(now(),now(),restoreProjectId),
         ...payload.chapters.map((c,i)=>insertChapter(restoreProjectId,c,i)),
-        db().prepare("UPDATE projects SET title=?,premise=?,summary=?,mainline=?,important_notes=?,genre=?,style=?,updated_at=? WHERE id=? AND workspace_id=?")
-          .bind(str(payload.project.title,120),str(payload.project.premise,12000),str(payload.project.summary,8000),str(payload.project.mainline,10000),str(payload.project.important_notes,6000),str(payload.project.genre,200),str(payload.project.style,2000),now(),restoreProjectId,session.id),
+        db().prepare("UPDATE projects SET title=?,premise=?,summary=?,mainline=?,story_bible=?,important_notes=?,genre=?,style=?,updated_at=? WHERE id=? AND workspace_id=?")
+          .bind(str(payload.project.title,120),str(payload.project.premise,12000),str(payload.project.summary,8000),str(payload.project.mainline,10000),str(payload.project.story_bible===undefined?previousStoryBible(payload.project,payload.characters,payload.cards):payload.project.story_bible,60000),str(payload.project.important_notes,6000),str(payload.project.genre,200),str(payload.project.style,2000),now(),restoreProjectId,session.id),
         ...(payload.characters?[db().prepare("DELETE FROM characters WHERE project_id=?").bind(restoreProjectId),...payload.characters.map(c=>db().prepare("INSERT INTO characters (id,project_id,name,role,goal,traits,relationships,secret,arc,from_chapter,until_chapter,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").bind(String(c.id),restoreProjectId,str(c.name,120),str(c.role,200),str(c.goal,2000),str(c.traits,2000),str(c.relationships,2000),str(c.secret,2000),str(c.arc,2000),c.from_chapter??null,c.until_chapter??null,now()))]:[]),
         ...(payload.cards?[db().prepare("DELETE FROM lore_cards WHERE project_id=?").bind(restoreProjectId),...payload.cards.map(c=>db().prepare("INSERT INTO lore_cards (id,project_id,category,content,from_chapter,until_chapter,done,updated_at) VALUES (?,?,?,?,?,?,?,?)").bind(String(c.id),restoreProjectId,str(c.category,40),str(c.content,2500),c.from_chapter??null,c.until_chapter??null,Number(c.done)||0,now()))]:[])]);
       return Response.json({id:restoreProjectId});

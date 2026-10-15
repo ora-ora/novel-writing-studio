@@ -57,6 +57,13 @@
       "when": 1792053394348,
       "tag": "0007_remove_legacy_shared",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1792055146201,
+      "tag": "0008_lovely_sir_ram",
+      "breakpoints": true
     }
   ]
 }

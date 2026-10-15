@@ -5,6 +5,7 @@ export const projects = sqliteTable("projects", {
   title: text("title").notNull(),
   premise: text("premise").notNull().default(""),
   summary: text("summary").notNull().default(""),
+  storyBible: text("story_bible").notNull().default(""),
   mainline: text("mainline").notNull().default(""),
   importantNotes: text("important_notes").notNull().default(""),
   genre: text("genre").notNull().default(""),
