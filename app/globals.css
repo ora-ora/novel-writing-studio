@@ -163,3 +163,49 @@ body {
 .settings-nav button{flex:1;border:0;background:transparent;border-radius:7px;color:#667d71;padding:9px 7px;cursor:pointer;font-size:13px;white-space:nowrap}
 .settings-nav button.active{background:#fffefa;color:#214b3d;font-weight:700;box-shadow:0 1px 4px #213b4014}
 .settings-dialog .story-bible-editor{min-height:300px;line-height:1.8;font-family:Georgia,"Songti SC","Noto Serif CJK SC",serif;font-size:15px;white-space:pre-wrap}
+
+/* Touch navigation keeps the manuscript visible and opens tools only when requested. */
+.sidebar-scrim,.assistant-scrim,.mobile-assistant-toggle,.assistant-close{display:none}
+@media(max-width:850px){
+  .sidebar{position:fixed;top:68px;bottom:0;height:calc(100dvh - 68px);width:min(85vw,320px);z-index:21;box-shadow:8px 4px 20px #26384026}
+  .sidebar-closed{width:min(85vw,320px);transform:translateX(-100%);pointer-events:none;box-shadow:none}
+  .sidebar-scrim{display:block;position:fixed;inset:68px 0 0;border:0;background:#192e2b70;z-index:20;cursor:pointer}
+  .chapter-item,.sidebar-add{min-height:44px}
+}
+@media(max-width:650px){
+  .topbar{height:auto;min-height:104px;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:40px 40px;align-content:center;gap:6px 8px;padding:8px 12px}
+  .brand{grid-column:1;grid-row:1;min-width:0}
+  .top-actions{grid-column:2;grid-row:1;justify-self:end}
+  .top-actions button{min-width:40px;min-height:40px}
+  .project-switcher{grid-column:1/-1;grid-row:2;max-width:none;width:100%;margin:0}
+  .project-switcher select{height:40px;font-size:16px}
+  .project-switcher .icon-button{width:40px;height:40px}
+  .sidebar{top:104px;height:calc(100dvh - 104px);padding-bottom:env(safe-area-inset-bottom)}
+  .sidebar-scrim{inset:104px 0 0}
+  .main-top{padding:8px 12px;gap:4px 8px}
+  .main-top .sidebar-toggle{width:40px;height:40px}
+  .main-top .breadcrumb{flex:1 1 calc(100% - 50px);min-width:0}
+  .main-top button:not(.sidebar-toggle){min-height:40px;padding:0 10px}
+  .mobile-assistant-toggle{display:inline-flex;gap:5px}
+  .editor-heading{padding:20px 16px 16px}
+  .editor-scroll{padding:0 8px 24px}
+  .editor-paper{padding:24px 16px;min-height:55dvh}
+  .title-input{font-size:24px;margin-bottom:24px}
+  .synopsis-editor,.body-editor{font-size:16px;line-height:1.85}
+  .body-editor{min-height:55dvh}
+  .revision-tools button,.chapter-controls button{min-height:40px}
+  .assistant-scrim{display:block;position:fixed;inset:0;border:0;background:#192e2b88;z-index:29;cursor:pointer}
+  .assistant-panel{position:fixed;inset:auto 0 0;z-index:30;width:100%;height:min(82dvh,760px);max-height:calc(100dvh - 12px - env(safe-area-inset-top));min-height:0;border:1px solid #dce3de;border-bottom:0;border-radius:18px 18px 0 0;box-shadow:0 -12px 40px #172d2a24;transform:translateY(105%);visibility:hidden;pointer-events:none;transition:transform .22s ease,visibility .22s}
+  .assistant-panel.mobile-open{transform:none;visibility:visible;pointer-events:auto}
+  .assistant-head{flex:none;height:56px;padding:0 18px}
+  .assistant-close{display:inline-flex;margin-left:auto;width:40px;height:40px}
+  .assistant-content{padding:20px 18px calc(22px + env(safe-area-inset-bottom));overscroll-behavior:contain}
+  .assistant-content textarea,.assistant-content input,.assistant-content select{font-size:16px}
+  .assistant-content button{min-height:40px}
+  [data-slot="dialog-content"].settings-dialog{width:calc(100vw - 16px);max-width:none;max-height:calc(100dvh - 16px);padding:20px 16px;gap:12px;overscroll-behavior:contain}
+  .settings-dialog input,.settings-dialog textarea{font-size:16px}
+  .settings-dialog .story-bible-editor{font-size:16px;min-height:240px}
+  .settings-dialog .dialog-actions{position:sticky;bottom:-20px;background:#fffefa;padding:12px 0 calc(10px + env(safe-area-inset-bottom));z-index:1;flex-wrap:wrap}
+  .settings-dialog .dialog-actions button,.field-ai-actions button{min-height:40px}
+}
+@media(prefers-reduced-motion:reduce){.assistant-panel{transition:none}}
