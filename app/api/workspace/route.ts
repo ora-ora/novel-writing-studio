@@ -47,13 +47,17 @@ export async function GET(request:Request) {
       if (byId.size !== ids.length) return fail("章节目录已变化，请刷新目录后重试", 409);
       return sessionResponse({ chapters: ids.map(id => ({ ...byId.get(id), outline_loaded: true, body_loaded: fullBody })) }, session);
     }
+    // Preserve the full response for already-open older clients. The new
+    // continuous reader explicitly opts into the lightweight catalog.
+    const catalog = params.get("view") === "catalog";
+    const columns = catalog ? "c.id,c.project_id,c.position,c.title,c.continuity_review,c.outline_revision,c.body_outline_revision,c.updated_at,LENGTH(c.body) AS body_length,'' AS body,'' AS synopsis,'' AS memory" : "c.*,LENGTH(c.body) AS body_length";
     const [projects,chapters,snapshots,drafts]=await Promise.all([
       db().prepare("SELECT * FROM projects WHERE workspace_id=? AND deleted_at IS NULL ORDER BY updated_at DESC").bind(session.id).all<Row>(),
-      db().prepare("SELECT c.id,c.project_id,c.position,c.title,c.continuity_review,c.outline_revision,c.body_outline_revision,c.updated_at,LENGTH(c.body) AS body_length,'' AS body,'' AS synopsis,'' AS memory,0 AS body_loaded,0 AS outline_loaded FROM chapters c JOIN projects p ON p.id=c.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY c.position ASC,c.id ASC").bind(session.id).all<Row>(),
+      db().prepare(`SELECT ${columns} FROM chapters c JOIN projects p ON p.id=c.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY c.position ASC,c.id ASC`).bind(session.id).all<Row>(),
       db().prepare("SELECT s.id,s.project_id,s.reason,s.created_at FROM project_snapshots s JOIN projects p ON p.id=s.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY s.created_at DESC LIMIT 30").bind(session.id).all<Row>(),
       db().prepare("SELECT d.* FROM generation_drafts d JOIN projects p ON p.id=d.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY d.created_at DESC LIMIT 30").bind(session.id).all<Row>(),
     ]);
-    return sessionResponse({projects:projects.results,chapters:chapters.results.map(c=>({...c,body_loaded:false,outline_loaded:false})),snapshots:snapshots.results,drafts:drafts.results},session);
+    return sessionResponse({projects:projects.results,chapters:chapters.results.map(c=>({...c,body_loaded:!catalog,outline_loaded:!catalog})),snapshots:snapshots.results,drafts:drafts.results},session);
   }catch(error){console.error("workspace read",error);return fail("项目暂时无法读取，请稍后刷新。",503);}
 }
 

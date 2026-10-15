@@ -112,7 +112,7 @@ export default function Home() {
 
   const load=useCallback(async()=>{
     try {
-      const response=await fetch("/api/workspace",{cache:"no-store"});const data=await response.json() as {error?:string;projects:Project[];chapters:Chapter[];snapshots:Snapshot[];drafts:SavedDraft[]};
+      const response=await fetch("/api/workspace?view=catalog",{cache:"no-store"});const data=await response.json() as {error?:string;projects:Project[];chapters:Chapter[];snapshots:Snapshot[];drafts:SavedDraft[]};
       if(!response.ok) throw new Error(data.error);
       setProjects(data.projects);setAllChapters(previous=>data.chapters.map(c=>{
         let backup:Partial<Chapter>={};

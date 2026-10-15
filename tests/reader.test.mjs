@@ -61,7 +61,7 @@ async function harness() {
   const route = await load(path.join(root, "app/api/workspace/route.ts"));
   const generate = await load(path.join(root, "app/api/generate/route.ts"));
   function get(params = {}, identity = workspace) {
-    return route.namespace.GET(new Request(`https://novel.test/api/workspace?${new URLSearchParams(params)}`, { headers: { cookie: `novel_ws=${identity}` } }));
+    return route.namespace.GET(new Request(`https://novel.test/api/workspace?${new URLSearchParams({ view: "catalog", ...params })}`, { headers: { cookie: `novel_ws=${identity}` } }));
   }
   function ai(fields = {}) {
     return generate.namespace.POST(new Request("https://novel.test/api/generate", { method: "POST", headers: { cookie: `novel_ws=${workspace}`, "Content-Type": "application/json" }, body: JSON.stringify({ kind: "body", projectId: "novel", selected: { id: "c164" }, chapters: [], endpoint: "https://model.example.test/v1/chat/completions", key: "offline-test-only", model: "offline", ...fields }) }));
@@ -89,6 +89,16 @@ test("chapter batches preserve requested order and outline batches do not fetch 
     assert.equal(outline.chapters[0].body_loaded, false);
     const body = await (await h.get({ view: "chapters", projectId: "novel", ids: "c80,c164", content: "body" })).json();
     assert.match(body.chapters[1].body, /BODY_164/); assert.equal(body.chapters[1].body_loaded, true);
+  } finally { h.close(); }
+});
+
+test("older open clients retain the full workspace response until they refresh", async () => {
+  const h = await harness();
+  try {
+    const data = await (await h.get({ view: "" })).json();
+    assert.equal(data.chapters[0].body, "BODY_0\nPREVIOUS_END_0");
+    assert.equal(data.chapters[0].synopsis, "SYNOPSIS_0");
+    assert.equal(data.chapters[0].body_loaded, true);
   } finally { h.close(); }
 });
 
