@@ -1,5 +1,4 @@
 import { env } from "cloudflare:workers";
-import { workspaceSession } from "../workspace/session";
 
 export const runtime = "edge";
 
@@ -34,16 +33,14 @@ export async function POST(request:Request) {
     if (!input.model?.trim()) return error("请填写模型名称");
     const key = useHostedDeepSeek ? env.DEEPSEEK_API_KEY : input.key;
     if (!key) return error("请填写自定义模型密钥，或选择已配置的 DeepSeek");
-    const session=workspaceSession(request);
-    if(session.fresh)return error("请刷新页面以建立工作区会话",401);
     const kind = input.kind;
     let chapters: Chapter[] = Array.isArray(input.chapters) ? input.chapters.slice(0,150) : [];
     if(input.projectId){
       const database=env.DB;
       if(!database)return error("数据库暂不可用",503);
-      const active=await database.prepare("SELECT id FROM projects WHERE id=? AND workspace_id=? AND deleted_at IS NULL").bind(input.projectId,session.id).first();
+      const active=await database.prepare("SELECT id FROM projects WHERE id=? AND deleted_at IS NULL").bind(input.projectId).first();
       if(!active)return error("作品不存在或已删除",403);
-      // Reading pages are lazy. Build AI context from the authorized database,
+      // Reading pages are lazy. Build AI context from the selected database work,
       // independently of which chapters happen to be loaded in the browser.
       const rows = await database.prepare("SELECT id,title,synopsis,memory,position FROM chapters WHERE project_id=? AND deleted_at IS NULL ORDER BY position,id").bind(input.projectId).all<Chapter & { memory: string; position: number }>();
       chapters = rows.results;
@@ -122,11 +119,9 @@ export async function POST(request:Request) {
       if(!env.DB)return error("默认模型额度暂不可用",503);
       const database=env.DB;
       const day=new Date().toISOString().slice(0,10);
-      for(const [scope,limit] of [["global",30],[session.id,10]] as const){
-        await database.prepare("INSERT OR IGNORE INTO generation_quota (day,workspace_id,calls) VALUES (?,?,0)").bind(day,scope).run();
-        const quota=await database.prepare("UPDATE generation_quota SET calls=calls+1 WHERE day=? AND workspace_id=? AND calls<?").bind(day,scope,limit).run();
-        if(!quota.meta.changes)return error(scope==="global"?"默认模型今日额度已用完，请使用自定义模型":"本工作区今日默认模型额度已用完，请使用自定义模型",429);
-      }
+      await database.prepare("INSERT OR IGNORE INTO generation_quota (day,workspace_id,calls) VALUES (?,?,0)").bind(day,"global").run();
+      const quota=await database.prepare("UPDATE generation_quota SET calls=calls+1 WHERE day=? AND workspace_id=? AND calls<?").bind(day,"global",30).run();
+      if(!quota.meta.changes)return error("默认模型今日全站额度已用完，请使用自定义模型",429);
     }
     const controller = new AbortController(); const timer = setTimeout(()=>controller.abort(),110000);
     let response:Response;
