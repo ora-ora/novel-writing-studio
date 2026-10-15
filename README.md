@@ -121,10 +121,13 @@ pnpm exec wrangler secret put DEEPSEEK_API_KEY --name novel-studio --config wran
 | --- | --- |
 | `CLOUDFLARE_API_TOKEN` | 限定目标账号的 Workers 部署 Token，执行迁移还需 D1 编辑权限。 |
 | `CLOUDFLARE_ACCOUNT_ID` | 目标 Cloudflare 账号 ID。 |
+| `DEEPSEEK_API_KEY`（可选） | 默认 DeepSeek 模型密钥；生产部署后通过标准输入同步为 Worker Secret，不写入代码、构建文件或日志。 |
 
 进入 Actions → Cloudflare CI/CD 可以查看日志或点击 Run workflow 手动发布。PR 只做类型检查、独立构建与部署目标校验；推送到 `main` 或手动运行 `main` 时，在检查成功后执行 D1 迁移与 Worker 部署。只有 Markdown 文档变化不会自动触发；文档更新需要发布时可手动运行。部署并发串行执行，不会中途取消正在执行的迁移。首次运行若提示 GitHub Actions 被禁用，先在仓库中启用 Actions。
 
-部署成功的实际地址在 `Deploy Worker` 步骤日志中。模型密钥只需在对应 Worker 的 Secrets 配置一次，后续普通代码发布会保留。首次发布未配置默认模型密钥时，可先测试创建作品和自定义模型。
+部署成功的实际地址在 `Deploy Worker` 步骤日志中。`Sync DeepSeek API key` 步骤会在生产部署后同步 GitHub repository secret `DEEPSEEK_API_KEY`；PR 不读取此密钥。GitHub 未设置或留空时跳过同步，保留 Cloudflare 已有密钥；需要删除已有密钥时请在 Cloudflare 中显式删除。同步失败会使流水线失败，但此前的代码发布可能已完成。更新 GitHub Secret 不会自动触发流水线，请在 Actions 中手动 Run workflow（选择 `main`）或等待下一次代码发布。若同时在 Cloudflare 手动管理同名密钥，下次同步会以 GitHub 中的值覆盖。
+
+也可以不在 GitHub 配置模型密钥，只在对应 Worker 的 Secrets 配置一次，后续普通代码发布会保留。首次发布未配置默认模型密钥时，可先测试创建作品和自定义模型。
 
 ## 本地独立运行与其他服务器
 
