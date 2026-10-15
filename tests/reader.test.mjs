@@ -6,6 +6,7 @@ import vm from "node:vm";
 import { DatabaseSync } from "node:sqlite";
 import ts from "typescript";
 import { batchAround, fetchChapterBatch, hasBody } from "../lib/chapters.ts";
+import { moveChapterId } from "../lib/chapter-order.ts";
 
 const workspace = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const anotherWorkspace = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -233,6 +234,49 @@ test("AI can use a shared work without cookies and preserves the existing global
     assert.equal((await h.ai(hosted, null)).status, 200);
     assert.equal((await h.ai(hosted, anotherWorkspace)).status, 429);
     assert.equal(h.database.prepare("SELECT calls FROM generation_quota WHERE day=? AND workspace_id='global'").get(day).calls, 30);
+  } finally { h.close(); }
+});
+
+test("chapter moves use final positions, preserve other order, and reject invalid destinations", () => {
+  const ids = ["a", "b", "c", "d"];
+  assert.deepEqual(moveChapterId(ids, "b", 3), ["a", "c", "d", "b"]);
+  assert.deepEqual(moveChapterId(ids, "d", 0), ["d", "a", "b", "c"]);
+  assert.deepEqual(moveChapterId(ids, "b", 0), ["b", "a", "c", "d"]);
+  assert.deepEqual(moveChapterId(ids, "b", 1), ids);
+  assert.deepEqual(ids, ["a", "b", "c", "d"]);
+  for (const position of [-1, 4, 1.5, NaN]) assert.throws(() => moveChapterId(ids, "b", position));
+  assert.throws(() => moveChapterId(ids, "missing", 0));
+});
+
+test("moving a chapter across a long directory changes only positions and survives reload", async () => {
+  const h = await harness();
+  try {
+    const before = h.database.prepare("SELECT * FROM chapters ORDER BY id").all();
+    const original = Array.from({ length: 165 }, (_, i) => `c${i}`);
+    const moved = moveChapterId(original, "c164", 0);
+    assert.equal((await h.post({ action: "reorder", projectId: "novel", ids: moved }, null)).status, 200);
+    const directory = (await (await h.get({}, anotherWorkspace)).json()).chapters.filter(c => c.project_id === "novel");
+    assert.deepEqual(directory.map(c => c.id), moved);
+    assert.deepEqual(directory.map(c => c.position), Array.from({ length: 165 }, (_, i) => i));
+    const after = h.database.prepare("SELECT * FROM chapters ORDER BY id").all();
+    const withoutPosition = rows => rows.map(({ position, ...chapter }) => chapter);
+    assert.deepEqual(withoutPosition(after), withoutPosition(before));
+    for (const id of ["removed", "foreign", "trash-chapter"]) {
+      assert.deepEqual(after.find(c => c.id === id), before.find(c => c.id === id));
+    }
+    assert.equal((await h.post({ action: "reorder", projectId: "novel", ids: moveChapterId(moved, "c164", 164) })).status, 200);
+    assert.deepEqual(h.database.prepare("SELECT id FROM chapters WHERE project_id='novel' AND deleted_at IS NULL ORDER BY position").all().map(c => c.id), original);
+  } finally { h.close(); }
+});
+
+test("stale or invalid reorder lists cannot drop, duplicate, or mix chapters", async () => {
+  const h = await harness();
+  try {
+    const ids = Array.from({ length: 165 }, (_, i) => `c${i}`);
+    for (const invalid of [ids.slice(1), [...ids.slice(0, -1), "c0"], [...ids.slice(0, -1), "foreign"], [...ids, "removed"]]) {
+      assert.equal((await h.post({ action: "reorder", projectId: "novel", ids: invalid })).status, 409);
+      assert.deepEqual(h.database.prepare("SELECT id FROM chapters WHERE project_id='novel' AND deleted_at IS NULL ORDER BY position").all().map(c => c.id), ids);
+    }
   } finally { h.close(); }
 });
 

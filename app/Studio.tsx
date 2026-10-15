@@ -1,10 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BookOpen, Plus, Settings2, Sparkles, PenLine, Download, ChevronUp, ChevronDown, Trash2, PanelLeftClose, PanelLeftOpen, RefreshCw, Check, X, ArrowRight, FileText } from "lucide-react";
+import { BookOpen, Plus, Settings2, Sparkles, PenLine, Download, ChevronUp, ChevronDown, MoreHorizontal, Trash2, PanelLeftClose, PanelLeftOpen, RefreshCw, Check, X, ArrowRight, FileText } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { moveChapterId } from "@/lib/chapter-order";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -70,6 +72,11 @@ export default function Home() {
   const [selectionEnd,setSelectionEnd]=useState(0);
   const [skipAnimation,setSkipAnimation]=useState(false);
   const [sidebar,setSidebar]=useState(true);
+  const [treeFocusId,setTreeFocusId]=useState("");
+  const [moveTargetId,setMoveTargetId]=useState("");
+  const [movePosition,setMovePosition]=useState("");
+  const [reordering,setReordering]=useState(false);
+  const reorderPending=useRef(false);
   const [mobileAssistantOpen,setMobileAssistantOpen]=useState(false);
   const [newOpen,setNewOpen]=useState(false);
   const [settingsOpen,setSettingsOpen]=useState(false);
@@ -109,6 +116,11 @@ export default function Home() {
   const chapters=useMemo(()=>allChapters.filter(c=>c.project_id===projectId).sort((a,b)=>a.position-b.position||a.id.localeCompare(b.id)),[allChapters,projectId]);
   const chapter=chapters.find(c=>c.id===chapterId);
   const readingChapter=chapters.find(c=>c.id===readingChapterId)||chapter;
+  const moveTarget=chapters.find(c=>c.id===moveTargetId);
+  const moveIndex=Number(movePosition)-1;
+  const validMove=!!moveTarget&&movePosition.trim()!==""&&Number.isInteger(moveIndex)&&moveIndex>=0&&moveIndex<chapters.length&&chapters[moveIndex]?.id!==moveTargetId;
+  const reorderDisabled=reordering||busy||!!fieldBusy||reviewBusy||addingChapter;
+  useEffect(()=>{setTreeFocusId("");setMoveTargetId("");},[projectId]);
 
   const load=useCallback(async()=>{
     try {
@@ -156,13 +168,13 @@ export default function Home() {
   },[view,chapterId,chapter?.updated_at,chapter?.body_loaded,ensureChapter]);
   useEffect(()=>{if(window.matchMedia("(max-width: 850px)").matches)setSidebar(false);},[]);
   useEffect(()=>{
-    if(view!=="read"||!sidebar)return;
+    if(!sidebar)return;
     const list=directory.current, item=list?.querySelector<HTMLElement>(".chapter-item.selected");
     if(!list||!item)return;
     const bounds=list.getBoundingClientRect(),rect=item.getBoundingClientRect();
     if(rect.top<bounds.top)list.scrollTop+=rect.top-bounds.top;
     else if(rect.bottom>bounds.bottom)list.scrollTop+=rect.bottom-bounds.bottom;
-  },[readingChapterId,sidebar,view]);
+  },[readingChapterId,chapterId,treeFocusId,chapters,sidebar,view]);
   useEffect(()=>{
     if(view==="edit"&&window.matchMedia("(max-width: 650px)").matches)window.scrollTo({top:0,behavior:"instant"});
   },[view,chapterId]);
@@ -216,6 +228,7 @@ export default function Home() {
   }
   async function switchProject(nextId:string){
     if(nextId===projectId)return;
+    if(reorderPending.current){toast("请等待章节移动完成");return;}
     if(busy||fieldBusy){toast("请先停止当前生成");return;}
     navigationSequence.current++;
     if(!await flushAllChapters())return;
@@ -308,24 +321,42 @@ export default function Home() {
     </div>{fieldBusy===field&&fieldBusyDraft===draft&&<div className="field-preview"><strong>AI 正在写作</strong><p ref={fieldStreamBox} onScroll={e=>{const el=e.currentTarget;followStream.current=el.scrollHeight-el.scrollTop-el.clientHeight<48;}} className={skipAnimation?"":"typing-output"} aria-live="polite">{streaming||"正在连接模型…"}</p><div className="field-preview-actions"><Button variant="outline" size="sm" onClick={stopGeneration}>停止生成</Button><Button variant="ghost" size="sm" onClick={()=>setSkipAnimation(!skipAnimation)}>{skipAnimation?"启用动画":"关闭动画"}</Button></div></div>}{fieldProposal?.field===field&&fieldProposal.draft===draft&&<div className="field-preview"><strong>{label}草稿{fieldProposal.selectionStart!==undefined?" · 仅替换选中段落":""}</strong><p>{fieldProposal.text}</p><div className="field-preview-actions"><Button variant="outline" size="sm" onClick={()=>setFieldProposal(null)}>舍弃</Button><Button size="sm" disabled={!!fieldBusy} onClick={()=>void acceptProjectField()}>{draft?"采用草稿":"采用并保存"}</Button></div></div>}</div>;
   }
   async function addChapter(title="新章节",synopsis=""){
-    if(!project||addChapterPending.current)return null;
+    if(!project||addChapterPending.current||reorderPending.current)return null;
     addChapterPending.current=true;setAddingChapter(true);
     try{const result=await post("addChapter",{projectId,title,synopsis});await load();setChapterId(result.id);setView("edit");if(window.matchMedia("(max-width: 850px)").matches)setSidebar(false);return result.id as string;}
     catch(e){toast.error(e instanceof Error?e.message:"添加失败");return null;}
     finally{addChapterPending.current=false;setAddingChapter(false);}
   }
   async function deleteChapter(){
+    if(reorderPending.current){toast("请等待章节移动完成");return;}
     if(!chapter||!window.confirm(`将「${chapter.title}」移出章节目录？概述与正文会保留；恢复入口稍后提供。`))return;
     if(!await flushAllChapters())return;
     try{await post("deleteChapter",{id:chapter.id});setChapterId("");await load();toast.success("章节已删除");}catch(e){toast.error(e instanceof Error?e.message:"删除失败");}
   }
-  async function moveChapter(direction:number){
-    if(!chapter)return;const index=chapters.findIndex(c=>c.id===chapter.id);const next=index+direction;if(next<0||next>=chapters.length)return;
-    const ids=chapters.map(c=>c.id);[ids[index],ids[next]]=[ids[next],ids[index]];
-    setAllChapters(items=>items.map(c=>c.project_id===projectId?{...c,position:ids.indexOf(c.id)}:c));
-    try{await post("reorder",{projectId,ids});}catch(e){toast.error("排序失败");await load();}
+  async function moveChapter(id:string,destination:number){
+    if(reorderPending.current||reorderDisabled||generationPending.current)return;
+    const original=chapters.map(c=>c.id), target=chapters.find(c=>c.id===id);
+    if(!target||original[destination]===id)return;
+    let ids:string[];
+    try{ids=moveChapterId(original,id,destination);}catch(e){toast.error(e instanceof Error?e.message:"移动失败");return;}
+    const owner=projectId, previousPositions=new Map(chapters.map(c=>[c.id,c.position]));
+    reorderPending.current=true;setReordering(true);
+    try{
+      if(!await flushAllChapters())return;
+      const positions=new Map(ids.map((key,index)=>[key,index]));
+      setAllChapters(items=>items.map(c=>c.project_id===owner&&positions.has(c.id)?{...c,position:positions.get(c.id)!}:c));
+      setTreeFocusId(id);
+      await post("reorder",{projectId:owner,ids});
+      setMoveTargetId("");
+      toast.success(`已移动到第 ${destination+1} 章`);
+    }catch(e){
+      setAllChapters(items=>items.map(c=>c.project_id===owner&&previousPositions.has(c.id)?{...c,position:previousPositions.get(c.id)!}:c));
+      toast.error(e instanceof Error?e.message:"排序失败");
+      await load();
+    }finally{reorderPending.current=false;setReordering(false);}
   }
   async function streamRequest(payload:Record<string,unknown>,onDelta?:(delta:string)=>void){
+    if(reorderPending.current)throw new Error("请等待章节移动完成，再使用 AI");
     if(payload.projectId&&!await flushAllChapters())throw new Error("请先保存章节，再使用 AI");
     const controller=new AbortController();generationAbort.current=controller;streamingRef.current="";followStream.current=true;setStreaming("");
     const response=await fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,...(payload.projectId?{chapters:[],selected:payload.selected?{id:(payload.selected as Chapter).id}:undefined}:{}),stream:true}),signal:controller.signal});
@@ -354,6 +385,7 @@ export default function Home() {
     try{const result=await post("saveDraft",{projectId:project.id,kind,targetId,content});setDrafts(items=>[{id:result.id,project_id:project.id,kind,target_id:targetId||null,content,created_at:new Date().toISOString()},...items].slice(0,30));}catch{toast.error("生成草稿未能保存，请复制预览内容");}
   }
   async function generate(kind:Proposal["kind"]|"test",requestedTarget?:string,requestedAfter?:string){
+    if(reorderPending.current){toast("请等待章节移动完成");return;}
     if(busy||fieldBusy||reviewBusy||generationPending.current)return;
     if(!model.endpoint||!model.model){setSettingsOpen(true);toast("请先配置模型地址和名称");return;}
     if(!project)return;
@@ -382,6 +414,7 @@ export default function Home() {
     finally{setBusy(false);setGenerationKind(null);generationPending.current=false;generationAbort.current=null;}
   }
   async function acceptProposal(){
+    if(reorderPending.current){toast("请等待章节移动完成");return;}
     if(!proposal||!project)return;setBusy(true);
     try{
       const chapterKinds=["rewrite","body","continue","bodyRewrite","selection","memory"];
@@ -467,11 +500,43 @@ export default function Home() {
     <div className="workspace">
       {sidebar&&<button className="sidebar-scrim" aria-label="关闭章节目录" onClick={()=>setSidebar(false)}/>}
       {project&&mobileAssistantOpen&&<button className="assistant-scrim" aria-label="关闭创作助手" onClick={()=>setMobileAssistantOpen(false)}/>}
-      <aside className={`sidebar ${sidebar?"":"sidebar-closed"}`}><div className="sidebar-head"><span className="eyebrow">章节目录 <b>{chapters.length}</b></span>{project&&<button className="icon-button" aria-label="添加章节" title="添加章节" disabled={false||addingChapter} onClick={()=>void addChapter()}><Plus size={17}/></button>}</div>
-
-        {project&&<><div ref={directory} className="chapter-list">{chapters.map((c,i)=><button key={c.id} className={`chapter-item ${c.id===(view==="read"?readingChapterId:chapterId)?"selected":""}`} onClick={()=>{if(view==="read"){setReaderJump({id:c.id,token:Date.now(),mode});selectReaderChapter(c.id);}else void editChapter(c.id);if(window.matchMedia("(max-width: 850px)").matches)setSidebar(false);}}><span className="chapter-number">{String(i+1).padStart(2,"0")}</span><span className="chapter-name">{c.title}</span>{hasBody(c)&&<span className="written-dot" title="已有正文"/>}</button>)}{!chapters.length&&<p className="side-empty">生成大纲或手动添加章节</p>}</div><button className="sidebar-add" disabled={false||addingChapter} onClick={()=>void addChapter()}><Plus size={16}/> 添加章节</button></>}{!project&&!loading&&<p className="side-empty">从顶部选择或新建作品</p>}
+      <aside className={`sidebar ${sidebar?"":"sidebar-closed"}`}>
+        <div className="sidebar-head"><span className="eyebrow">章节目录 <b>{chapters.length}</b></span><div className="sidebar-head-actions">
+          {project&&<button className="icon-button" aria-label="添加章节" title="添加章节" disabled={addingChapter||reordering} onClick={()=>void addChapter()}><Plus size={17}/></button>}
+          <button className="icon-button directory-close" aria-label="关闭章节目录" onClick={()=>setSidebar(false)}><X size={18}/></button>
+        </div></div>
+        {project&&<><div ref={directory} className="chapter-list">{chapters.map((c,i)=>{
+          const selected=c.id===(treeFocusId||(view==="read"?readingChapterId:chapterId));
+          return <div key={c.id} className={`chapter-row ${selected?"selected":""}`}>
+            <button className={`chapter-item ${selected?"selected":""}`} aria-current={selected?"true":undefined} onClick={()=>{
+              setTreeFocusId("");
+              if(view==="read"){setReaderJump({id:c.id,token:Date.now(),mode});selectReaderChapter(c.id);}else void editChapter(c.id);
+              if(window.matchMedia("(max-width: 850px)").matches)setSidebar(false);
+            }}><span className="chapter-number">{String(i+1).padStart(2,"0")}</span><span className="chapter-name">{c.title}</span>{hasBody(c)&&<span className="written-dot" title="已有正文"/>}</button>
+            <DropdownMenu><DropdownMenuTrigger asChild><button className="icon-button chapter-more" aria-label={`第 ${i+1} 章「${c.title}」的更多操作`} title="章节更多操作" disabled={reorderDisabled}><MoreHorizontal size={19}/></button></DropdownMenuTrigger>
+              <DropdownMenuContent align="end" sideOffset={5} className="chapter-menu-content">
+                <DropdownMenuItem disabled={reorderDisabled||i===0} onSelect={()=>void moveChapter(c.id,i-1)}><ChevronUp/>上移一章</DropdownMenuItem>
+                <DropdownMenuItem disabled={reorderDisabled||i===chapters.length-1} onSelect={()=>void moveChapter(c.id,i+1)}><ChevronDown/>下移一章</DropdownMenuItem>
+                <DropdownMenuItem disabled={reorderDisabled||chapters.length<2} onSelect={()=>{setMoveTargetId(c.id);setMovePosition(String(i+1));}}><ArrowRight/>移动到…</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>;
+        })}{!chapters.length&&<p className="side-empty">生成大纲或手动添加章节</p>}</div>
+        <button className="sidebar-add" disabled={addingChapter||reordering} onClick={()=>void addChapter()}><Plus size={16}/> 添加章节</button></>}
+        {!project&&!loading&&<p className="side-empty">从顶部选择或新建作品</p>}
         <div className="sidebar-bottom"><span>全站共享 · 数据保存在云端。</span></div>
       </aside>
+      <Dialog open={!!moveTarget} onOpenChange={open=>{if(!open&&!reordering)setMoveTargetId("");}}>
+        <DialogContent className="settings-dialog move-chapter-dialog"><DialogHeader><DialogTitle>移动章节</DialogTitle></DialogHeader>
+          <p className="move-chapter-title">{moveTarget?.title}</p>
+          <form onSubmit={e=>{e.preventDefault();if(validMove)void moveChapter(moveTargetId,moveIndex);}}>
+            <Label htmlFor="chapter-destination">移动后成为第几章</Label>
+            <Input id="chapter-destination" type="number" inputMode="numeric" min={1} max={chapters.length} step={1} autoFocus value={movePosition} disabled={reordering} onChange={e=>setMovePosition(e.target.value)} aria-describedby="move-chapter-help"/>
+            <p id="move-chapter-help">当前第 {moveTarget?chapters.indexOf(moveTarget)+1:"—"} 章，共 {chapters.length} 章。输入 1 至 {chapters.length}，章节概述和正文会一起保留。</p>
+            <div className="dialog-actions"><Button type="button" variant="outline" disabled={reordering} onClick={()=>setMoveTargetId("")}>取消</Button><Button type="submit" disabled={!validMove||reorderDisabled}>{reordering?"移动中…":"确认移动"}</Button></div>
+          </form>
+        </DialogContent>
+      </Dialog>
       <main className={`main-area ${view==="read"?"reading-mode":""}`}><div className="main-top"><button className="icon-button sidebar-toggle" title="展开或收起目录" aria-label="展开或收起目录" aria-expanded={sidebar} onClick={()=>setSidebar(!sidebar)}>{sidebar?<PanelLeftClose size={18}/>:<PanelLeftOpen size={18}/>}</button><div className="breadcrumb">{project?.title||"新作品"}<span>/</span>{(view==="read"?readingChapter:chapter)?.title||"大纲"}</div>{project&&<><Button variant="ghost" size="sm" onClick={()=>setShowHistory(true)}>版本</Button></>}{project&&<Dialog open={storyOpen} onOpenChange={async open=>{if(!open&&projectDirty){if(!await saveProject(project||{}))return;}setStoryOpen(open);}}><Button variant="ghost" size="sm" onClick={()=>{setStoryOpen(true);}}>作品设定 <ArrowRight size={14}/></Button><DialogContent className="settings-dialog character-dialog"><DialogHeader><DialogTitle>作品设定</DialogTitle></DialogHeader>
         <div className="field"><Label htmlFor="story-title">书名</Label><Input id="story-title" value={project.title} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,title:e.target.value}:p));}}/></div>
         <div className="field"><Label htmlFor="story-genre">题材</Label><Input id="story-genre" value={project.genre} onChange={e=>{setProjectDirty(true);setProjects(items=>items.map(p=>p.id===project.id?{...p,genre:e.target.value}:p));}} placeholder="悬疑、科幻、奇幻……"/></div>
@@ -488,7 +553,7 @@ export default function Home() {
         <div className="dialog-actions"><Button variant="destructive" onClick={async()=>{if(!window.confirm("将整部作品移出工作台？作品、章节和正文会保留；恢复入口稍后提供。"))return;if(!await flushAllChapters())return;if(projectDirty&&!await saveProject(project))return;await post("deleteProject",{id:project.id});setStoryOpen(false);setProjectId("");await load();}}>删除作品</Button><Button onClick={async()=>{if(await saveProject(project))setStoryOpen(false);}}>保存设定</Button></div></DialogContent></Dialog>}{project&&<Button className="mobile-assistant-toggle" variant="outline" size="sm" aria-expanded={mobileAssistantOpen} onClick={()=>{setSidebar(false);setMobileAssistantOpen(true);}}><Sparkles size={16}/> AI 助手</Button>}</div>
         {!project? <section className="welcome"><div className="welcome-icon"><BookOpen size={32}/></div><div className="eyebrow">新的故事</div><h1>从一个念头，写到最后一章。</h1><p>先创建作品，写下故事设定。你可以生成大纲，也可以从空白章节开始。</p><Button onClick={()=>setNewOpen(true)}><Plus size={17}/> 新建小说</Button></section>:
         <><div className="editor-heading"><div><span className="eyebrow">{view==="read"?"连续浏览":chapter?`第 ${chapters.findIndex(c=>c.id===chapter.id)+1} 章`:"故事蓝图"}</span><h1>{(view==="read"?readingChapter:chapter)?.title||project.title}</h1></div><Tabs value={mode} onValueChange={async value=>{if(!await flushAllChapters())return;setMode(value as "outline"|"body");setReaderJump(null);setSelection("");}}><TabsList><TabsTrigger value="outline" disabled={busy||!!fieldBusy}><FileText size={16}/> 大纲</TabsTrigger><TabsTrigger value="body" disabled={busy||!!fieldBusy}><PenLine size={16}/> 正文</TabsTrigger></TabsList></Tabs></div><div className="reading-toolbar" role="group" aria-label="浏览或编辑"><Button variant={view==="read"?"secondary":"ghost"} size="sm" aria-pressed={view==="read"} onClick={()=>void readChapters()}>连续浏览</Button><Button variant={view==="edit"?"secondary":"ghost"} size="sm" aria-pressed={view==="edit"} disabled={!chapters.length||busy||!!fieldBusy} onClick={()=>void editChapter(readingChapterId||chapterId||chapters[0]?.id)}>单章编辑</Button>{view==="edit"&&<span>自动保存 · 返回浏览会恢复阅读位置</span>}</div>
-        {view==="read"&&chapters.length>0?<ContinuousReader key={`${project.id}:${mode}`} projectId={project.id} chapters={chapters} mode={mode} initialChapterId={chapterId} jump={readerJump} busy={busy||!!fieldBusy||reviewBusy} onRead={selectReaderChapter} onEdit={id=>void editChapter(id)} onAI={readerAI} onRefresh={()=>void load()}/>:chapter&&!chapter.body_loaded?<div className="editor-scroll editor-loading" role="status"><p>{detailError||"正在加载章节…"}</p>{detailError&&<Button variant="outline" disabled={detailBusy} onClick={()=>void editChapter(chapter.id)}>重新加载</Button>}</div>:<div className="editor-scroll"><div className="editor-paper">{chapter?<>{mode==="outline"?<><div className="editor-label">章节标题</div><input className="title-input" aria-label="章节标题" disabled={busy||!!fieldBusy} value={chapter.title} onChange={e=>updateChapter(chapter.id,{title:e.target.value})} placeholder="输入章节标题"/><div className="editor-label synopsis-label">章节概述</div><textarea className="synopsis-editor" aria-label="章节概述" disabled={busy||!!fieldBusy} value={chapter.synopsis} onChange={e=>updateChapter(chapter.id,{synopsis:e.target.value})} placeholder="这一章发生什么？人物想要什么，又遇到什么阻碍？"/><div className="chapter-controls"><Button variant="ghost" size="sm" onClick={()=>void moveChapter(-1)} disabled={false||chapters.indexOf(chapter)===0}><ChevronUp size={15}/> 上移</Button><Button variant="ghost" size="sm" onClick={()=>void moveChapter(1)} disabled={false||chapters.indexOf(chapter)===chapters.length-1}><ChevronDown size={15}/> 下移</Button><Button variant="ghost" size="sm" onClick={()=>void deleteChapter()}><Trash2 size={15}/> 删除章节</Button></div></>:<><div className="body-synopsis"><span>本章概述</span><p>{chapter.synopsis||"先在大纲中写下本章概述，生成正文会更准确。"}</p></div>{chapter.body&&chapter.body_outline_revision!==null&&chapter.body_outline_revision<chapter.outline_revision&&<div className="stale-note">大纲已修改，请检查正文是否仍与当前概述一致。</div>}{!!chapter.continuity_review&&<div className="stale-note">故事设定或相邻大纲已变化，请复核本章承接、人物与时间线。<Button size="sm" variant="outline" onClick={async()=>{await post("markReviewed",{id:chapter.id});await load();}}>已复核</Button></div>}<textarea onSelect={e=>{const area=e.currentTarget;setSelectionStart(area.selectionStart);setSelectionEnd(area.selectionEnd);setBodyCursor(area.selectionEnd);setSelection(area.value.slice(area.selectionStart,area.selectionEnd));}} className="body-editor" aria-label="章节正文" disabled={busy||!!fieldBusy} value={chapter.body} onChange={e=>updateChapter(chapter.id,{body:e.target.value})} placeholder="在这里写作，或打开 AI 助手生成本章正文……"/><div className="revision-tools"><span>{selection?`已选 ${selection.length} 字`:"选中正文片段后可局部修订"}</span>{(["expand","rewrite","shorten","polish"] as const).map(op=><Button key={op} size="sm" variant="outline" disabled={!selection||busy||false} onClick={()=>{selectionOperation.current=op;void generate("selection");}}>{({expand:"扩写",rewrite:"重写",shorten:"缩写",polish:"润色"})[op]}</Button>)}</div><div className="memory-box"><Label htmlFor="chapter-memory">本章事实记忆 · 后续章节会引用</Label><Textarea id="chapter-memory" rows={3} disabled={busy||!!fieldBusy} value={chapter.memory||""} onChange={e=>updateChapter(chapter.id,{memory:e.target.value})} placeholder="本章发生了什么，哪些伏笔尚未回收？"/><Button variant="outline" size="sm" disabled={!chapter.body||busy||false} onClick={()=>void generate("memory")}>AI 整理本章记忆</Button></div></>}</>:<div className="outline-empty"><div className="empty-ornament"><Sparkles size={26}/></div><h2>故事，从大纲开始</h2><p>在 AI 助手中设置章节数并生成整部大纲，或手动添加第一章。</p><Button variant="outline" disabled={false||addingChapter} onClick={()=>void addChapter()}><Plus size={16}/> 手动添加章节</Button></div>}</div></div>}</>}
+        {view==="read"&&chapters.length>0?<ContinuousReader key={`${project.id}:${mode}`} projectId={project.id} chapters={chapters} mode={mode} initialChapterId={chapterId} jump={readerJump} busy={busy||!!fieldBusy||reviewBusy} onRead={selectReaderChapter} onEdit={id=>void editChapter(id)} onAI={readerAI} onRefresh={()=>void load()}/>:chapter&&!chapter.body_loaded?<div className="editor-scroll editor-loading" role="status"><p>{detailError||"正在加载章节…"}</p>{detailError&&<Button variant="outline" disabled={detailBusy} onClick={()=>void editChapter(chapter.id)}>重新加载</Button>}</div>:<div className="editor-scroll"><div className="editor-paper">{chapter?<>{mode==="outline"?<><div className="editor-label">章节标题</div><input className="title-input" aria-label="章节标题" disabled={busy||!!fieldBusy} value={chapter.title} onChange={e=>updateChapter(chapter.id,{title:e.target.value})} placeholder="输入章节标题"/><div className="editor-label synopsis-label">章节概述</div><textarea className="synopsis-editor" aria-label="章节概述" disabled={busy||!!fieldBusy} value={chapter.synopsis} onChange={e=>updateChapter(chapter.id,{synopsis:e.target.value})} placeholder="这一章发生什么？人物想要什么，又遇到什么阻碍？"/><div className="chapter-controls"><Button variant="ghost" size="sm" onClick={()=>void deleteChapter()}><Trash2 size={15}/> 删除章节</Button></div></>:<><div className="body-synopsis"><span>本章概述</span><p>{chapter.synopsis||"先在大纲中写下本章概述，生成正文会更准确。"}</p></div>{chapter.body&&chapter.body_outline_revision!==null&&chapter.body_outline_revision<chapter.outline_revision&&<div className="stale-note">大纲已修改，请检查正文是否仍与当前概述一致。</div>}{!!chapter.continuity_review&&<div className="stale-note">故事设定或相邻大纲已变化，请复核本章承接、人物与时间线。<Button size="sm" variant="outline" onClick={async()=>{await post("markReviewed",{id:chapter.id});await load();}}>已复核</Button></div>}<textarea onSelect={e=>{const area=e.currentTarget;setSelectionStart(area.selectionStart);setSelectionEnd(area.selectionEnd);setBodyCursor(area.selectionEnd);setSelection(area.value.slice(area.selectionStart,area.selectionEnd));}} className="body-editor" aria-label="章节正文" disabled={busy||!!fieldBusy} value={chapter.body} onChange={e=>updateChapter(chapter.id,{body:e.target.value})} placeholder="在这里写作，或打开 AI 助手生成本章正文……"/><div className="revision-tools"><span>{selection?`已选 ${selection.length} 字`:"选中正文片段后可局部修订"}</span>{(["expand","rewrite","shorten","polish"] as const).map(op=><Button key={op} size="sm" variant="outline" disabled={!selection||busy||false} onClick={()=>{selectionOperation.current=op;void generate("selection");}}>{({expand:"扩写",rewrite:"重写",shorten:"缩写",polish:"润色"})[op]}</Button>)}</div><div className="memory-box"><Label htmlFor="chapter-memory">本章事实记忆 · 后续章节会引用</Label><Textarea id="chapter-memory" rows={3} disabled={busy||!!fieldBusy} value={chapter.memory||""} onChange={e=>updateChapter(chapter.id,{memory:e.target.value})} placeholder="本章发生了什么，哪些伏笔尚未回收？"/><Button variant="outline" size="sm" disabled={!chapter.body||busy||false} onClick={()=>void generate("memory")}>AI 整理本章记忆</Button></div></>}</>:<div className="outline-empty"><div className="empty-ornament"><Sparkles size={26}/></div><h2>故事，从大纲开始</h2><p>在 AI 助手中设置章节数并生成整部大纲，或手动添加第一章。</p><Button variant="outline" disabled={false||addingChapter} onClick={()=>void addChapter()}><Plus size={16}/> 手动添加章节</Button></div>}</div></div>}</>}
       </main>
       {project&&<aside className={`assistant-panel ${mobileAssistantOpen?"mobile-open":""}`} aria-label="创作助手"><div className="assistant-head"><div className="assistant-symbol"><Sparkles size={17}/></div><span>创作助手</span><button className="icon-button assistant-close" aria-label="关闭创作助手" onClick={()=>setMobileAssistantOpen(false)}><X size={18}/></button></div><div className="assistant-content"><div className="helper-title">{mode==="outline"?"让故事继续生长":"写下这一章"}</div><p className="assistant-target">AI 目标 · {["outline","append"].includes(generationKind||proposal?.kind||"")?"全书":chapters.find(c=>c.id===(proposal?.target||chapterId))?.title||"全书"}{(busy||proposal)&&<small>本次目标已固定，滚动浏览不会改变</small>}</p><p className="helper-description">{mode==="outline"?"会参考小说概要与故事资料。生成内容会先展示，确认后才保存。":"会参考小说概要、故事资料、章节概述与前文。你可以先调整写作要求。"}</p><div className="field"><Label htmlFor="instruction">补充要求</Label><Textarea id="instruction" rows={5} placeholder={mode==="outline"?"例如：前三章增加悬念；加强女主的主动性……":"例如：突出雨夜的压迫感，多写人物之间的对话……"} value={instruction} onChange={e=>setInstruction(e.target.value)}/></div>{mode==="outline"&&<div className="field"><Label htmlFor="count">生成章节数</Label><Input id="count" type="number" min={1} max={30} value={count} onChange={e=>setCount(Number(e.target.value))}/></div>}
           {mode==="outline"&&<div className="field"><Label htmlFor="insert-after">AI 插入位置</Label><select id="insert-after" value={insertAfterId} onChange={e=>setInsertAfterId(e.target.value)}><option value="__start__">全书最前面</option>{chapters.map((c,i)=><option key={c.id} value={c.id}>第 {i+1} 章《{c.title}》之后</option>)}</select><p className="model-hint">插入只新增章节，已有正文保留；相邻正文会提示复核。</p></div>}

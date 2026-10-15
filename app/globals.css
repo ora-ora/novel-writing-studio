@@ -210,6 +210,34 @@ body {
 }
 @media(prefers-reduced-motion:reduce){.assistant-panel{transition:none}}
 
+.sidebar-head-actions{display:flex;align-items:center;gap:4px}
+.sidebar-head,.sidebar-add,.sidebar-bottom{flex-shrink:0}
+.chapter-list{min-height:0;overscroll-behavior:contain}
+.chapter-row{display:flex;align-items:center;min-width:0;border-radius:8px;margin-bottom:3px}
+.chapter-row.selected{background:#e6eee3}
+.chapter-row .chapter-item{flex:1;min-width:0;width:auto;margin:0;min-height:48px}
+.chapter-row .chapter-item.selected{background:transparent}
+.chapter-row .chapter-more{flex:none;width:36px;height:40px;margin-right:3px;color:#6f8377}
+.chapter-row .chapter-more:hover,.chapter-row .chapter-more[data-state="open"]{background:#dce8d8;color:#294c3d}
+.chapter-row button:focus-visible{outline:2px solid #638367;outline-offset:-2px}
+.chapter-menu-content{min-width:170px}
+.chapter-menu-content [data-slot="dropdown-menu-item"]{min-height:44px;gap:10px;font-size:14px}
+.directory-close{display:none}
+.move-chapter-title{font-size:15px;line-height:1.6;overflow-wrap:anywhere;color:#426958}
+.move-chapter-dialog form{display:grid;gap:12px;min-width:0}
+.move-chapter-dialog form>p{font-size:13px;color:#81918a;line-height:1.7}
+@media(max-width:850px){
+  .sidebar,.sidebar.sidebar-closed{width:min(92vw,360px)}
+  .sidebar-head{padding:16px 14px 12px 20px;min-height:68px}
+  .sidebar-head-actions .icon-button,.directory-close{display:inline-flex;width:44px;height:44px}
+  .chapter-list{padding:0 10px}
+  .chapter-row .chapter-item{min-height:56px;padding:12px 8px;gap:9px}
+  .chapter-row .chapter-more{width:44px;height:48px;margin-right:2px}
+  .chapter-name{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.45;overflow-wrap:anywhere}
+  .sidebar-add{min-height:44px;margin:8px 20px 12px}
+  .sidebar-bottom{padding:12px 20px}
+}
+
 .reading-mode .editor-heading{padding-top:22px;padding-bottom:15px;align-items:center}
 .reading-mode{min-height:0}
 .reading-mode .editor-heading h1{font-size:24px;max-width:30ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
