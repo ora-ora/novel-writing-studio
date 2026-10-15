@@ -5,6 +5,7 @@ export const projects = sqliteTable("projects", {
   title: text("title").notNull(),
   premise: text("premise").notNull().default(""),
   summary: text("summary").notNull().default(""),
+  mainline: text("mainline").notNull().default(""),
   importantNotes: text("important_notes").notNull().default(""),
   genre: text("genre").notNull().default(""),
   style: text("style").notNull().default(""),
@@ -38,6 +39,21 @@ export const loreCards = sqliteTable("lore_cards", {
   done: integer("done").notNull().default(0),
   updatedAt: text("updated_at").notNull(),
 });
+
+export const characters = sqliteTable("characters", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  role: text("role").notNull().default(""),
+  goal: text("goal").notNull().default(""),
+  traits: text("traits").notNull().default(""),
+  relationships: text("relationships").notNull().default(""),
+  secret: text("secret").notNull().default(""),
+  arc: text("arc").notNull().default(""),
+  fromChapter: integer("from_chapter"),
+  untilChapter: integer("until_chapter"),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [index("idx_characters_project").on(table.projectId)]);
 
 export const projectSnapshots = sqliteTable("project_snapshots", {
   id: text("id").primaryKey(),

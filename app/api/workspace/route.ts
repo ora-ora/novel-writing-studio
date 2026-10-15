@@ -16,8 +16,10 @@ async function ownedChapter(id:string,workspaceId:string) {
 async function snapshot(projectId:string,reason:string) {
   const project=await db().prepare("SELECT * FROM projects WHERE id=?").bind(projectId).first<Row>();
   const rows=await db().prepare("SELECT * FROM chapters WHERE project_id=? AND deleted_at IS NULL ORDER BY position").bind(projectId).all<Row>();
+  const characters=await db().prepare("SELECT * FROM characters WHERE project_id=?").bind(projectId).all<Row>();
+  const cards=await db().prepare("SELECT * FROM lore_cards WHERE project_id=?").bind(projectId).all<Row>();
   return db().prepare("INSERT INTO project_snapshots (id,project_id,reason,payload,created_at) VALUES (?,?,?,?,?)")
-    .bind(crypto.randomUUID(),projectId,reason,JSON.stringify({project,chapters:rows.results}),now());
+    .bind(crypto.randomUUID(),projectId,reason,JSON.stringify({project,chapters:rows.results,characters:characters.results,cards:cards.results}),now());
 }
 function insertChapter(projectId:string,c:Row,position:number) {
   return db().prepare("INSERT INTO chapters (id,project_id,position,title,synopsis,body,outline_revision,body_outline_revision,updated_at,memory,continuity_review,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET position=excluded.position,title=excluded.title,synopsis=excluded.synopsis,body=excluded.body,outline_revision=excluded.outline_revision,body_outline_revision=excluded.body_outline_revision,updated_at=excluded.updated_at,memory=excluded.memory,continuity_review=excluded.continuity_review,deleted_at=NULL WHERE chapters.project_id=excluded.project_id")
@@ -27,14 +29,15 @@ function insertChapter(projectId:string,c:Row,position:number) {
 export async function GET(request:Request) {
   const session=workspaceSession(request);
   try {
-    const [projects,chapters,cards,snapshots,drafts]=await Promise.all([
+    const [projects,chapters,cards,characters,snapshots,drafts]=await Promise.all([
       db().prepare("SELECT * FROM projects WHERE (workspace_id=? OR workspace_id='legacy') AND deleted_at IS NULL ORDER BY updated_at DESC").bind(session.id).all<Row>(),
       db().prepare("SELECT c.* FROM chapters c JOIN projects p ON p.id=c.project_id WHERE (p.workspace_id=? OR p.workspace_id='legacy') AND p.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY c.position ASC").bind(session.id).all<Row>(),
       db().prepare("SELECT l.* FROM lore_cards l JOIN projects p ON p.id=l.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY l.updated_at DESC").bind(session.id).all<Row>(),
+      db().prepare("SELECT c.* FROM characters c JOIN projects p ON p.id=c.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY c.updated_at DESC").bind(session.id).all<Row>(),
       db().prepare("SELECT s.id,s.project_id,s.reason,s.created_at FROM project_snapshots s JOIN projects p ON p.id=s.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY s.created_at DESC LIMIT 30").bind(session.id).all<Row>(),
       db().prepare("SELECT d.* FROM generation_drafts d JOIN projects p ON p.id=d.project_id WHERE p.workspace_id=? AND p.deleted_at IS NULL ORDER BY d.created_at DESC LIMIT 30").bind(session.id).all<Row>(),
     ]);
-    return sessionResponse({projects:projects.results.map(p=>({...p,legacy:p.workspace_id==="legacy"})),chapters:chapters.results,cards:cards.results,snapshots:snapshots.results,drafts:drafts.results},session);
+    return sessionResponse({projects:projects.results.map(p=>({...p,legacy:p.workspace_id==="legacy"})),chapters:chapters.results,cards:cards.results,characters:characters.results,snapshots:snapshots.results,drafts:drafts.results},session);
   }catch(error){console.error("workspace read",error);return fail("项目暂时无法读取，请稍后刷新。",503);}
 }
 
@@ -48,26 +51,32 @@ export async function POST(request:Request) {
     const projectId=String(data.projectId||"");
     if(action==="createProject"){
       const newId=crypto.randomUUID();
-      await db().prepare("INSERT INTO projects (id,title,premise,summary,important_notes,genre,style,updated_at,workspace_id) VALUES (?,?,?,?,?,?,?,?,?)")
-        .bind(newId,str(data.title||"未命名小说",120),str(data.premise,12000),str(data.summary,8000),str(data.important_notes,6000),str(data.genre,200),str(data.style,2000),now(),session.id).run();
+      await db().prepare("INSERT INTO projects (id,title,premise,summary,mainline,important_notes,genre,style,updated_at,workspace_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
+        .bind(newId,str(data.title||"未命名小说",120),str(data.premise,12000),str(data.summary,8000),str(data.mainline,10000),str(data.important_notes,6000),str(data.genre,200),str(data.style,2000),now(),session.id).run();
       return Response.json({id:newId});
     }
     if(action==="cloneLegacy"&&id){
       const old=await db().prepare("SELECT * FROM projects WHERE id=? AND workspace_id='legacy' AND deleted_at IS NULL").bind(id).first<Row>();
       if(!old)return fail("旧版作品不存在",404);
       const chapters=await db().prepare("SELECT * FROM chapters WHERE project_id=? AND deleted_at IS NULL ORDER BY position").bind(id).all<Row>();
+      const oldCards=await db().prepare("SELECT * FROM lore_cards WHERE project_id=?").bind(id).all<Row>();
+      const oldCharacters=await db().prepare("SELECT * FROM characters WHERE project_id=?").bind(id).all<Row>();
       const newId=crypto.randomUUID();
       await db().batch([
-        db().prepare("INSERT INTO projects (id,title,premise,summary,important_notes,genre,style,updated_at,workspace_id) VALUES (?,?,?,?,?,?,?,?,?)")
-          .bind(newId,str(old.title,120),str(old.premise,12000),str(old.summary,8000),str(old.important_notes,6000),str(old.genre,200),str(old.style,2000),now(),session.id),
+        db().prepare("INSERT INTO projects (id,title,premise,summary,mainline,important_notes,genre,style,updated_at,workspace_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
+          .bind(newId,str(old.title,120),str(old.premise,12000),str(old.summary,8000),str(old.mainline,10000),str(old.important_notes,6000),str(old.genre,200),str(old.style,2000),now(),session.id),
         ...chapters.results.map((c,i)=>insertChapter(newId,{...c,id:crypto.randomUUID()},i)),
+        ...oldCards.results.map(c=>db().prepare("INSERT INTO lore_cards (id,project_id,category,content,from_chapter,until_chapter,done,updated_at) VALUES (?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),newId,str(c.category,40),str(c.content,2500),c.from_chapter??null,c.until_chapter??null,Number(c.done)||0,now())),
+        ...oldCharacters.results.map(c=>db().prepare("INSERT INTO characters (id,project_id,name,role,goal,traits,relationships,secret,arc,from_chapter,until_chapter,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),newId,str(c.name,120),str(c.role,200),str(c.goal,2000),str(c.traits,2000),str(c.relationships,2000),str(c.secret,2000),str(c.arc,2000),c.from_chapter??null,c.until_chapter??null,now())),
       ]);
       return Response.json({id:newId});
     }
     if(action==="updateProject"&&id){
       if(!await owned(id,session.id))return fail("作品不存在或需要先复制到私人工作区",403);
-      await db().batch([await snapshot(id,"修改作品设定前"),db().prepare("UPDATE projects SET title=?,premise=?,summary=?,important_notes=?,genre=?,style=?,updated_at=? WHERE id=? AND workspace_id=?")
-        .bind(str(data.title||"未命名小说",120),str(data.premise,12000),str(data.summary,8000),str(data.important_notes,6000),str(data.genre,200),str(data.style,2000),now(),id,session.id)]);
+      const previous=await owned(id,session.id);
+      const mainlineChanged=String(previous?.mainline||"")!==str(data.mainline,10000);
+      await db().batch([await snapshot(id,"修改作品设定前"),db().prepare("UPDATE projects SET title=?,premise=?,summary=?,mainline=?,important_notes=?,genre=?,style=?,updated_at=? WHERE id=? AND workspace_id=?")
+        .bind(str(data.title||"未命名小说",120),str(data.premise,12000),str(data.summary,8000),str(data.mainline,10000),str(data.important_notes,6000),str(data.genre,200),str(data.style,2000),now(),id,session.id),...(mainlineChanged?[db().prepare("UPDATE chapters SET continuity_review=1 WHERE project_id=? AND deleted_at IS NULL AND body<>''").bind(id)]:[])]);
       return Response.json({ok:true});
     }
     if(action==="snapshotProject"&&projectId){
@@ -152,12 +161,14 @@ export async function POST(request:Request) {
     if(action==="restoreSnapshot"&&id){
       const row=await db().prepare("SELECT s.* FROM project_snapshots s JOIN projects p ON p.id=s.project_id WHERE s.id=? AND p.workspace_id=? AND p.deleted_at IS NULL").bind(id,session.id).first<Row>();
       if(!row)return fail("版本不存在",404);
-      const payload=JSON.parse(String(row.payload)) as {project:Row;chapters:Row[]};
+      const payload=JSON.parse(String(row.payload)) as {project:Row;chapters:Row[];characters?:Row[];cards?:Row[]};
       const restoreProjectId=String(row.project_id);
       await db().batch([await snapshot(restoreProjectId,"恢复前备份"),db().prepare("UPDATE chapters SET deleted_at=?,updated_at=? WHERE project_id=? AND deleted_at IS NULL").bind(now(),now(),restoreProjectId),
         ...payload.chapters.map((c,i)=>insertChapter(restoreProjectId,c,i)),
-        db().prepare("UPDATE projects SET title=?,premise=?,summary=?,important_notes=?,genre=?,style=?,updated_at=? WHERE id=? AND workspace_id=?")
-          .bind(str(payload.project.title,120),str(payload.project.premise,12000),str(payload.project.summary,8000),str(payload.project.important_notes,6000),str(payload.project.genre,200),str(payload.project.style,2000),now(),restoreProjectId,session.id)]);
+        db().prepare("UPDATE projects SET title=?,premise=?,summary=?,mainline=?,important_notes=?,genre=?,style=?,updated_at=? WHERE id=? AND workspace_id=?")
+          .bind(str(payload.project.title,120),str(payload.project.premise,12000),str(payload.project.summary,8000),str(payload.project.mainline,10000),str(payload.project.important_notes,6000),str(payload.project.genre,200),str(payload.project.style,2000),now(),restoreProjectId,session.id),
+        ...(payload.characters?[db().prepare("DELETE FROM characters WHERE project_id=?").bind(restoreProjectId),...payload.characters.map(c=>db().prepare("INSERT INTO characters (id,project_id,name,role,goal,traits,relationships,secret,arc,from_chapter,until_chapter,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").bind(String(c.id),restoreProjectId,str(c.name,120),str(c.role,200),str(c.goal,2000),str(c.traits,2000),str(c.relationships,2000),str(c.secret,2000),str(c.arc,2000),c.from_chapter??null,c.until_chapter??null,now()))]:[]),
+        ...(payload.cards?[db().prepare("DELETE FROM lore_cards WHERE project_id=?").bind(restoreProjectId),...payload.cards.map(c=>db().prepare("INSERT INTO lore_cards (id,project_id,category,content,from_chapter,until_chapter,done,updated_at) VALUES (?,?,?,?,?,?,?,?)").bind(String(c.id),restoreProjectId,str(c.category,40),str(c.content,2500),c.from_chapter??null,c.until_chapter??null,Number(c.done)||0,now()))]:[])]);
       return Response.json({id:restoreProjectId});
     }
     if(action==="saveLoreCard"&&projectId){
@@ -169,6 +180,32 @@ export async function POST(request:Request) {
       await db().prepare("INSERT INTO lore_cards (id,project_id,category,content,from_chapter,until_chapter,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET category=excluded.category,content=excluded.content,from_chapter=excluded.from_chapter,until_chapter=excluded.until_chapter,updated_at=excluded.updated_at WHERE project_id=excluded.project_id")
         .bind(cardId,projectId,category,content,from,until,now()).run();
       return Response.json({id:cardId});
+    }
+    if(action==="saveCharacter"&&projectId){
+      if(!await owned(projectId,session.id))return fail("作品不存在",403);
+      const name=str(data.name,120).trim();if(!name)return fail("请填写人物姓名");
+      const existing=id?await db().prepare("SELECT id FROM characters WHERE id=? AND project_id=?").bind(id,projectId).first():null;
+      if(id&&!existing)return fail("人物设定不存在",404);
+      const characterId=id||crypto.randomUUID();
+      const from=data.from_chapter==null?null:Math.max(1,Math.floor(Number(data.from_chapter)||1));
+      const until=data.until_chapter==null?null:Math.max(from||1,Math.floor(Number(data.until_chapter)||1));
+      await db().batch([await snapshot(projectId,"修改人物设定前"),db().prepare("INSERT INTO characters (id,project_id,name,role,goal,traits,relationships,secret,arc,from_chapter,until_chapter,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,role=excluded.role,goal=excluded.goal,traits=excluded.traits,relationships=excluded.relationships,secret=excluded.secret,arc=excluded.arc,from_chapter=excluded.from_chapter,until_chapter=excluded.until_chapter,updated_at=excluded.updated_at WHERE project_id=excluded.project_id")
+        .bind(characterId,projectId,name,str(data.role,200),str(data.goal,2000),str(data.traits,2000),str(data.relationships,2000),str(data.secret,2000),str(data.arc,2000),from,until,now()),
+        db().prepare("UPDATE chapters SET continuity_review=1 WHERE project_id=? AND deleted_at IS NULL AND body<>'' AND (? IS NULL OR position+1>=?) AND (? IS NULL OR position+1<=?)").bind(projectId,from,from,until,until)]);
+      return Response.json({id:characterId});
+    }
+    if(action==="deleteCharacter"&&id){
+      const row=await db().prepare("SELECT c.project_id FROM characters c JOIN projects p ON p.id=c.project_id WHERE c.id=? AND p.workspace_id=? AND p.deleted_at IS NULL").bind(id,session.id).first<{project_id:string}>();
+      if(!row)return fail("人物设定不存在",404);
+      await db().batch([await snapshot(row.project_id,"删除人物设定前"),db().prepare("DELETE FROM characters WHERE id=?").bind(id),db().prepare("UPDATE chapters SET continuity_review=1 WHERE project_id=? AND deleted_at IS NULL AND body<>''").bind(row.project_id)]);
+      return Response.json({ok:true});
+    }
+    if(action==="convertCharacter"&&id){
+      const row=await db().prepare("SELECT l.* FROM lore_cards l JOIN projects p ON p.id=l.project_id WHERE l.id=? AND l.category='character' AND p.workspace_id=? AND p.deleted_at IS NULL").bind(id,session.id).first<Row>();
+      if(!row)return fail("旧人物卡不存在",404);
+      const projectId=String(row.project_id),characterId=crypto.randomUUID();
+      await db().batch([await snapshot(projectId,"转换旧人物卡前"),db().prepare("INSERT INTO characters (id,project_id,name,traits,from_chapter,until_chapter,updated_at) VALUES (?,?,?,?,?,?,?)").bind(characterId,projectId,str(String(row.content).split(/[：:\n]/)[0]||"待命名人物",120),str(row.content,2000),row.from_chapter??null,row.until_chapter??null,now()),db().prepare("DELETE FROM lore_cards WHERE id=?").bind(id)]);
+      return Response.json({id:characterId});
     }
     if(action==="deleteLoreCard"&&id){
       const row=await db().prepare("SELECT l.id FROM lore_cards l JOIN projects p ON p.id=l.project_id WHERE l.id=? AND p.workspace_id=? AND p.deleted_at IS NULL").bind(id,session.id).first();

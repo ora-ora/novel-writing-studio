@@ -154,3 +154,8 @@ body {
 .sidebar>.side-empty{flex:1;padding:8px 24px}
 @media(max-width:850px){.project-switcher{margin-left:0}.project-switcher label{display:none}}
 @media(max-width:650px){.topbar{gap:8px}.brand-divider{display:none}.project-switcher{gap:4px}.project-switcher select{height:34px;font-size:13px;padding-left:7px}.project-switcher .icon-button{width:27px}.top-actions{gap:2px}.top-actions button{padding:0 7px}}
+.character-dialog{width:min(94vw,720px);max-width:720px}
+.character-list{display:flex;gap:8px;overflow:auto;padding:2px 0 15px}
+.character-item{flex:none;min-width:100px;display:flex;align-items:center;gap:5px;flex-direction:column;border:1px solid #dce4dc;border-radius:9px;background:#f9faf6;padding:10px 15px;cursor:pointer;color:#29463e}
+.character-item.active{background:#deebe0;border-color:#91b39d}.character-item small{color:#85968b;font-size:11px}
+.character-editor{border-top:1px solid #e5eae3;padding-top:18px}.legacy-character{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-top:1px solid #e5eae3;font-size:13px}.legacy-character span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

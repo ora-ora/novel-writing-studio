@@ -43,6 +43,13 @@
       "when": 1791967502185,
       "tag": "0005_sparkling_raider",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792027243646,
+      "tag": "0006_curved_chat",
+      "breakpoints": true
     }
   ]
 }

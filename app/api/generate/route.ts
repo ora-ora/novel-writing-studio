@@ -24,7 +24,7 @@ function parseChapters(text:string) {
 }
 export async function POST(request:Request) {
   try {
-    const input = await request.json() as {kind:string; endpoint:string; key:string; model:string; title:string; premise:string; summary:string; important_notes:string; genre:string; style:string; chapters:Chapter[]; selected?:Chapter; instruction?:string; count?:number; temperature?:number; field?:string; operation?:string; stream?:boolean; projectId?:string; selection?:string; afterChapterId?:string; cursor?:number};
+    const input = await request.json() as {kind:string; endpoint:string; key:string; model:string; title:string; premise:string; summary:string; mainline:string; important_notes:string; genre:string; style:string; chapters:Chapter[]; selected?:Chapter; instruction?:string; count?:number; temperature?:number; field?:string; operation?:string; stream?:boolean; projectId?:string; selection?:string; afterChapterId?:string; cursor?:number; character?:Record<string,string>};
     const defaultEndpoint = "https://api.deepseek.com/chat/completions";
     const defaultModel = "deepseek-flash";
     const useHostedDeepSeek =
@@ -39,16 +39,18 @@ export async function POST(request:Request) {
     const kind = input.kind;
     const chapters = Array.isArray(input.chapters) ? input.chapters.slice(0,150) : [];
     const outline = chapters.map((c,i)=>`第${i+1}章 ${c.title}：${c.synopsis}`).join("\n").slice(0,30000);
-    let cardContext="";
+    let cardContext="",characterContext="";
     if(input.projectId){
       const active=await env.DB?.prepare("SELECT id FROM projects WHERE id=? AND workspace_id=? AND deleted_at IS NULL").bind(input.projectId,session.id).first();
       if(!active)return error("作品不存在或已删除",403);
       const cards=await env.DB?.prepare("SELECT l.* FROM lore_cards l JOIN projects p ON p.id=l.project_id WHERE p.id=? AND p.workspace_id=? AND p.deleted_at IS NULL").bind(input.projectId,session.id).all<{category:string;content:string;from_chapter:number|null;until_chapter:number|null}>();
       const chapterIndex=chapters.findIndex(c=>c.id===input.selected?.id)+1;
       cardContext=(cards?.results||[]).filter(c=>!chapterIndex||(!c.from_chapter||chapterIndex>=c.from_chapter)&&(!c.until_chapter||chapterIndex<=c.until_chapter)).map(c=>`[${c.category}] ${c.content}`).join("\n").slice(0,12000);
+      const characters=await env.DB?.prepare("SELECT name,role,goal,traits,relationships,secret,arc,from_chapter,until_chapter FROM characters WHERE project_id=? ORDER BY updated_at DESC").bind(input.projectId).all<{name:string;role:string;goal:string;traits:string;relationships:string;secret:string;arc:string;from_chapter:number|null;until_chapter:number|null}>();
+      characterContext=(characters?.results||[]).filter(c=>!chapterIndex||(!c.from_chapter||chapterIndex>=c.from_chapter)&&(!c.until_chapter||chapterIndex<=c.until_chapter)).map(c=>`[人物 ${c.name}·${c.role}] 目标：${c.goal}；性格：${c.traits}；关系：${c.relationships}；秘密：${c.secret}；成长：${c.arc}${c.from_chapter?`；第${c.from_chapter}章起登场`:""}`).join("\n").slice(0,10000);
     }
-    const base = `书名：${String(input.title || "").slice(0,120)}\n题材：${String(input.genre || "").slice(0,200)}\n小说概要：${String(input.summary || "").slice(0,8000)}\n世界设定与核心冲突：${String(input.premise || "").slice(0,12000)}\n这本小说的重要提示（人物设定、禁忌、必须遵守的写作要求）：${String(input.important_notes || "").slice(0,6000)}\n文风：${String(input.style || "").slice(0,2000)}`;
-    const context=`${base}\n适用的设定卡：\n${cardContext||"（暂无）"}`;
+    const base = `书名：${String(input.title || "").slice(0,120)}\n题材：${String(input.genre || "").slice(0,200)}\n小说概要：${String(input.summary || "").slice(0,8000)}\n故事主线（目标、转折、高潮和结局方向）：${String(input.mainline || "").slice(0,10000)}\n世界设定与核心冲突：${String(input.premise || "").slice(0,12000)}\n这本小说的重要提示（禁忌、必须遵守的写作要求）：${String(input.important_notes || "").slice(0,6000)}\n文风：${String(input.style || "").slice(0,2000)}`;
+    const context=`${base}\n适用人物：\n${characterContext||"（暂无）"}\n适用的设定卡：\n${cardContext||"（暂无）"}`;
     const instruction = String(input.instruction || "").slice(0,3000);
     const count = Math.min(30,Math.max(1,Number(input.count)||8));
     let prompt = ""; let json = false;
@@ -76,20 +78,28 @@ export async function POST(request:Request) {
     } else if (kind === "projectField") {
       const field = input.field;
       const operation = input.operation;
-      if (field !== "summary" && field !== "important_notes") return error("未知作品字段");
+      if (field !== "summary" && field !== "important_notes" && field !== "mainline") return error("未知作品字段");
       if (operation !== "generate" && operation !== "expand" && operation !== "rewrite") return error("未知修改方式");
-      const current = String(input[field] || "").slice(0, field === "summary" ? 8000 : 6000);
+      const current = String(input[field] || "").slice(0, field === "summary" ? 8000 : field === "mainline" ? 10000 : 6000);
       if (operation !== "generate" && !current.trim()) return error("请先填写内容，再扩写或重写");
-      const label = field === "summary" ? "小说概要" : "重要提示";
+      const label = field === "summary" ? "小说概要" : field === "mainline" ? "故事主线" : "重要提示";
       const goal = field === "summary"
         ? "写成一段清楚的故事概要，交代主要人物、核心冲突、故事发展和吸引读者的悬念；避免提前定死尚未确定的结局。"
-        : "写成便于后续写作遵守的具体提示，逐条列出人物设定、世界规则、时间线、伏笔或写作禁忌；仅提炼已有信息，不凭空宣布新设定。";
+        : field === "mainline" ? "按起点与目标、核心阻碍、阶段转折、高潮、结局方向组织主线；保留尚未决定的开放问题，不覆盖已有章节事实。" : "写成便于后续写作遵守的具体提示，逐条列出世界规则、时间线、伏笔或写作禁忌；仅提炼已有信息，不凭空宣布新设定。";
       const action = operation === "generate"
         ? "根据已有作品资料生成"
         : operation === "expand"
           ? "保留原有事实与约束，在其基础上补充细节并扩写"
           : "根据修改要求重写，保留原有关键事实与约束";
       prompt = `${context}\n已写章节大纲：\n${outline}\n当前${label}：\n${current || "（暂无）"}\n请${action}${label}。${goal}\n修改要求：${instruction || "无"}\n只输出可直接填入「${label}」的正文，不要标题、解释或 Markdown 代码块。`;
+    } else if(kind==="characterField"){
+      const operation=input.operation;
+      if(!["generate","expand","rewrite"].includes(String(operation)))return error("未知修改方式");
+      const c=input.character||{};
+      prompt=`${context}\n已有章节大纲：\n${outline}\n当前人物资料：${JSON.stringify(c)}\n任务：${operation==="generate"?"生成":operation==="expand"?"在现有事实基础上扩写":"保留确定事实并重写"}一位人物。${c.name?`姓名必须为「${c.name}」。`:""}不得改写已有章节事实；未确定的秘密不要当作已揭露内容。附加要求：${instruction}\n只返回 JSON 对象，字段为 name,role,goal,traits,relationships,secret,arc，所有字段值为字符串。`;
+    } else if(kind==="reviewSettings"){
+      const memories=chapters.map((c,i)=>`第${i+1}章：${(c as Chapter & {memory?:string}).memory||c.synopsis}`).join("\n").slice(0,16000);
+      prompt=`${context}\n当前章节大纲：\n${outline}\n已写事实记忆：\n${memories}\n对照故事主线、人物目标/关系/秘密与已写章节，列出明确的矛盾及受影响章节，并给出可选修订建议。区分“确定矛盾”和“需要作者确认”；没有证据的地方不要臆造。不要直接改写大纲或正文。附加要求：${instruction}`;
     } else if (kind === "selection" && input.selected && input.selection?.trim()) {
       const operation=String(input.operation||"rewrite");
       const goals:Record<string,string>={expand:"保留原意并补足动作、感官、对话与细节",rewrite:"根据要求重写，保留关键事实",shorten:"精简重复和冗余描写",polish:"改善语句节奏和文风，不改变事实"};
