@@ -286,9 +286,9 @@ body {
  .longform-panel button,.finding-card button{min-height:44px}
  .compare-columns{grid-template-columns:1fr}
  .draft-review{max-height:60dvh}
- .project-switcher .project-search{width:70px;font-size:14px;height:40px}
- .project-switcher .tag-filter{width:72px;font-size:13px;height:40px}
- .project-switcher #project-select{flex:2;min-width:70px;font-size:14px}
+ .project-switcher .project-search{width:70px;font-size:16px;height:40px}
+ .project-switcher .tag-filter{width:72px;font-size:16px;height:40px}
+ .project-switcher #project-select{flex:2;min-width:70px;font-size:16px}
 }
 .main-top{flex-wrap:nowrap}
 .workspace-mode-tabs{flex:none;margin-left:auto}
