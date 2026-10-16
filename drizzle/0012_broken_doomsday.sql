@@ -1,0 +1,1 @@
+ALTER TABLE `setting_entries` ADD `reveal_chapter_id` text;

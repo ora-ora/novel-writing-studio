@@ -1,3 +1,4 @@
+import { invalidateReferences } from "../../../lib/longform";
 import { cleanAIChapterTitle } from "../../../lib/chapter-title";
 import { env } from "cloudflare:workers";
 import { sessionResponse, workspaceSession } from "./session";
@@ -28,7 +29,7 @@ async function snapshot(projectId:string,reason:string) {
     .bind(crypto.randomUUID(),projectId,reason,JSON.stringify({project,chapters:rows.results,characters:characters.results,cards:cards.results}),now());
 }
 function insertChapter(projectId:string,c:Row,position:number) {
-  return db().prepare("INSERT INTO chapters (id,project_id,position,title,synopsis,body,outline_revision,body_outline_revision,updated_at,memory,continuity_review,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET position=excluded.position,title=excluded.title,synopsis=excluded.synopsis,body=excluded.body,outline_revision=excluded.outline_revision,body_outline_revision=excluded.body_outline_revision,updated_at=excluded.updated_at,memory=excluded.memory,continuity_review=excluded.continuity_review,deleted_at=NULL WHERE chapters.project_id=excluded.project_id")
+  return db().prepare("INSERT INTO chapters (id,project_id,position,title,synopsis,body,outline_revision,body_outline_revision,updated_at,memory,continuity_review,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET position=excluded.position,title=excluded.title,synopsis=excluded.synopsis,body=excluded.body,outline_revision=excluded.outline_revision,body_outline_revision=excluded.body_outline_revision,updated_at=excluded.updated_at,memory=excluded.memory,continuity_review=excluded.continuity_review,deleted_at=NULL,body_revision=chapters.body_revision+1,memory_revision=0 WHERE chapters.project_id=excluded.project_id")
     .bind(String(c.id||crypto.randomUUID()),projectId,position,str(c.title,180),str(c.synopsis,15000),str(c.body,300000),Number(c.outline_revision)||1,c.body_outline_revision==null?null:Number(c.body_outline_revision),now(),str(c.memory,3000),Number(c.continuity_review)||0);
 }
 
@@ -42,7 +43,7 @@ export async function GET(request:Request) {
       const ids = (params.get("ids") || "").split(",").filter(Boolean);
       const fullBody = params.get("content") === "body";
       if (!ids.length || ids.length > (fullBody ? 3 : 20) || new Set(ids).size !== ids.length || ids.some(id => id.length > 80)) return fail("章节请求无效");
-      const columns = fullBody ? "c.*" : "c.id,c.project_id,c.position,c.title,c.synopsis,c.memory,c.continuity_review,c.outline_revision,c.body_outline_revision,c.updated_at,'' AS body";
+      const columns = fullBody ? "c.*" : "c.id,c.project_id,c.position,c.title,c.synopsis,c.memory,c.continuity_review,c.outline_revision,c.body_outline_revision,c.updated_at,c.body_revision,c.memory_revision,'' AS body";
       const rows = await db().prepare(`SELECT ${columns},LENGTH(c.body) AS body_length FROM chapters c WHERE c.project_id=? AND c.deleted_at IS NULL AND c.id IN (${ids.map(()=>"?").join(",")})`).bind(projectId, ...ids).all<Row>();
       const byId = new Map(rows.results.map(row => [row.id, row]));
       if (byId.size !== ids.length) return fail("章节目录已变化，请刷新目录后重试", 409);
@@ -51,7 +52,7 @@ export async function GET(request:Request) {
     // Preserve the full response for already-open older clients. The new
     // continuous reader explicitly opts into the lightweight catalog.
     const catalog = params.get("view") === "catalog";
-    const columns = catalog ? "c.id,c.project_id,c.position,c.title,c.continuity_review,c.outline_revision,c.body_outline_revision,c.updated_at,LENGTH(c.body) AS body_length,'' AS body,'' AS synopsis,'' AS memory" : "c.*,LENGTH(c.body) AS body_length";
+    const columns = catalog ? "c.id,c.project_id,c.position,c.title,c.continuity_review,c.outline_revision,c.body_outline_revision,c.updated_at,c.body_revision,c.memory_revision,LENGTH(c.body) AS body_length,'' AS body,'' AS synopsis,'' AS memory" : "c.*,LENGTH(c.body) AS body_length";
     const [projects,chapters,snapshots,drafts]=await Promise.all([
       db().prepare("SELECT * FROM projects WHERE deleted_at IS NULL ORDER BY updated_at DESC").all<Row>(),
       db().prepare(`SELECT ${columns} FROM chapters c JOIN projects p ON p.id=c.project_id WHERE p.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY c.position ASC,c.id ASC`).all<Row>(),
@@ -78,9 +79,11 @@ export async function POST(request:Request) {
     if(action==="updateProject"&&id){
       if(!await activeProject(id))return fail("作品不存在或已删除",403);
       const previous=await activeProject(id);
+      const contextChanged=["summary","style","story_bible","book_outline"].some(key=>data[key]!==undefined&&String(previous?.[key]||"")!==String(data[key]));
       const bibleChanged=String(previous?.story_bible||"")!==str(data.story_bible,60000);
-      await db().batch([await snapshot(id,"修改作品设定前"),db().prepare("UPDATE projects SET title=?,summary=?,story_bible=?,genre=?,style=?,updated_at=? WHERE id=?")
-        .bind(str(data.title||"未命名小说",120),str(data.summary,8000),str(data.story_bible,60000),str(data.genre,200),str(data.style,8000),now(),id),...(bibleChanged?[db().prepare("UPDATE chapters SET continuity_review=1 WHERE project_id=? AND deleted_at IS NULL AND body<>''").bind(id)]:[])]);
+      await db().batch([await snapshot(id,"修改作品设定前"),db().prepare("UPDATE projects SET title=?,summary=?,story_bible=?,genre=?,style=?,book_outline=?,tags=?,updated_at=? WHERE id=?")
+        .bind(str(data.title||"未命名小说",120),str(data.summary,8000),str(data.story_bible,60000),str(data.genre,200),str(data.style,8000),str(data.book_outline??previous?.book_outline,16000),str(data.tags??previous?.tags,1000),now(),id),...(bibleChanged?[db().prepare("UPDATE chapters SET continuity_review=1 WHERE project_id=? AND deleted_at IS NULL AND body<>''").bind(id)]:[])]);
+      if(contextChanged)await invalidateReferences(db(),id,"project",id);
       return Response.json({ok:true});
     }
     if(action==="snapshotProject"&&projectId){
@@ -99,17 +102,30 @@ export async function POST(request:Request) {
       const count=await db().prepare("SELECT COALESCE(MAX(position),-1)+1 AS next FROM chapters WHERE project_id=? AND deleted_at IS NULL").bind(projectId).first<{next:number}>();
       await db().prepare("INSERT INTO chapters (id,project_id,position,title,synopsis,body,outline_revision,updated_at,memory) VALUES (?,?,?,?,?,'',1,?,'')")
         .bind(newId,projectId,count?.next??0,str(data.title||"新章节",180),str(data.synopsis,15000),now()).run();
+      await invalidateReferences(db(),projectId,"order",projectId);
       return Response.json({id:newId});
     }
     if(action==="updateChapter"&&id){
       const row=await activeChapter(id);
       if(!row)return fail("章节不存在或已删除",403);
+      if(data.expectedBodyRevision!==undefined&&Number(data.expectedBodyRevision)!==Number(row.body_revision))return fail("正文已在另一页面修改，请先复制当前草稿并刷新后合并",409);
+      if(data.expectedOutlineRevision!==undefined&&Number(data.expectedOutlineRevision)!==Number(row.outline_revision))return fail("章纲已在另一页面修改，请刷新后合并",409);
       const title=str(data.title??row.title,180),synopsis=str(data.synopsis??row.synopsis,15000),body=str(data.body??row.body,300000);
       const changed=title!==row.title||synopsis!==row.synopsis;
       const revision=Number(row.outline_revision)+(changed?1:0);
-      await db().prepare("UPDATE chapters SET title=?,synopsis=?,body=?,memory=?,outline_revision=?,body_outline_revision=?,updated_at=? WHERE id=?")
-        .bind(title,synopsis,body,str(data.memory??row.memory,3000),revision,data.body_outline_revision===undefined?row.body_outline_revision:data.body_outline_revision===-1?revision:data.body_outline_revision,now(),id).run();
-      return Response.json({ok:true,outlineRevision:revision});
+      const bodyChanged=body!==row.body,bodyRevision=Number(row.body_revision)+(bodyChanged?1:0);
+      const saved=await db().prepare("UPDATE chapters SET title=?,synopsis=?,body=?,memory=?,outline_revision=?,body_outline_revision=?,body_revision=?,memory_revision=?,updated_at=? WHERE id=? AND body_revision=? AND outline_revision=?")
+        .bind(title,synopsis,body,str(data.memory??row.memory,3000),revision,data.body_outline_revision===undefined?row.body_outline_revision:data.body_outline_revision===-1?revision:data.body_outline_revision,bodyRevision,data.memory!==undefined?bodyRevision:row.memory_revision,now(),id,row.body_revision,row.outline_revision).run();
+      if(!saved.meta.changes)return fail("章节已被其他操作修改，请刷新后合并",409);
+      if(changed)await invalidateReferences(db(),String(row.project_id),"outline",id);
+      if(bodyChanged){await invalidateReferences(db(),String(row.project_id),"body",id);await invalidateReferences(db(),String(row.project_id),"memory",id);await db().prepare("UPDATE consistency_checks SET stale=1 WHERE chapter_id=?").bind(id).run();}
+      if(bodyChanged)await invalidateReferences(db(),String(row.project_id),"legacyMemory",id);
+      if(data.memory!==undefined){
+       await invalidateReferences(db(),String(row.project_id),"legacyMemory",id);
+       await db().prepare("INSERT INTO chapter_memories (chapter_id,project_id,body_revision,summary,facts,updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(chapter_id) DO UPDATE SET body_revision=excluded.body_revision,summary=excluded.summary,facts='',updated_at=excluded.updated_at").bind(id,row.project_id,bodyRevision,str(data.memory,3000),"",now()).run();
+       await invalidateReferences(db(),String(row.project_id),"memory",id);
+      }
+      return Response.json({ok:true,outlineRevision:revision,bodyRevision});
     }
     if(action==="markReviewed"&&id){
       if(!await activeChapter(id))return fail("章节不存在",403);
@@ -119,6 +135,7 @@ export async function POST(request:Request) {
     if(action==="deleteChapter"&&id){
       const row=await activeChapter(id);if(!row)return fail("章节不存在",403);
       await db().batch([await snapshot(String(row.project_id),"删除章节前"),db().prepare("UPDATE chapters SET deleted_at=?,updated_at=? WHERE id=? AND deleted_at IS NULL").bind(now(),now(),id)]);
+      await invalidateReferences(db(),String(row.project_id),"order",String(row.project_id));
       return Response.json({ok:true});
     }
     if(action==="reorder"&&projectId&&Array.isArray(data.ids)){
@@ -127,6 +144,7 @@ export async function POST(request:Request) {
       const ids=data.ids.filter((v):v is string=>typeof v==="string");
       if(ids.length!==rows.results.length||new Set(ids).size!==ids.length||ids.some(v=>!rows.results.some(r=>r.id===v)))return fail("章节列表已变化，请刷新重试",409);
       await db().batch(ids.map((chapterId,i)=>db().prepare("UPDATE chapters SET position=? WHERE id=? AND project_id=? AND deleted_at IS NULL").bind(i,chapterId,projectId)));
+      await invalidateReferences(db(),projectId,"order",projectId);
       return Response.json({ok:true});
     }
     if(action==="replaceOutline"&&projectId&&Array.isArray(data.chapters)){
@@ -134,6 +152,7 @@ export async function POST(request:Request) {
       const incoming=data.chapters.slice(0,100).map((c,i)=>({id:crypto.randomUUID(),title:cleanAIChapterTitle((c as Row).title),synopsis:str((c as Row).synopsis,15000),position:i}));
       if(!incoming.length)return fail("大纲不能为空");
       await db().batch([await snapshot(projectId,"重建全书大纲"),db().prepare("UPDATE chapters SET deleted_at=?,updated_at=? WHERE project_id=? AND deleted_at IS NULL").bind(now(),now(),projectId),...incoming.map(c=>insertChapter(projectId,c,c.position))]);
+      await invalidateReferences(db(),projectId,"order",projectId);
       return Response.json({id:incoming[0].id});
     }
     if(action==="appendOutline"&&projectId&&Array.isArray(data.chapters)){
@@ -142,6 +161,7 @@ export async function POST(request:Request) {
       const incoming=data.chapters.slice(0,100).map((c,i)=>({id:crypto.randomUUID(),title:cleanAIChapterTitle((c as Row).title),synopsis:str((c as Row).synopsis,15000),position:(count?.next??0)+i}));
       if(!incoming.length)return fail("没有可追加的章节");
       await db().batch([await snapshot(projectId,"追加大纲前"),...incoming.map(c=>insertChapter(projectId,c,c.position))]);
+      await invalidateReferences(db(),projectId,"order",projectId);
       return Response.json({id:incoming[0].id});
     }
     if(action==="insertOutline"&&projectId&&Array.isArray(data.chapters)){
@@ -160,6 +180,7 @@ export async function POST(request:Request) {
         ...incoming.map(c=>insertChapter(projectId,c,c.position)),
         ...neighbors.map(c=>db().prepare("UPDATE chapters SET continuity_review=1 WHERE id=?").bind(c.id)),
       ]);
+      await invalidateReferences(db(),projectId,"order",projectId);
       return Response.json({id:incoming[0].id});
     }
     if(action==="restoreSnapshot"&&id){
@@ -169,10 +190,12 @@ export async function POST(request:Request) {
       const restoreProjectId=String(row.project_id);
       await db().batch([await snapshot(restoreProjectId,"恢复前备份"),db().prepare("UPDATE chapters SET deleted_at=?,updated_at=? WHERE project_id=? AND deleted_at IS NULL").bind(now(),now(),restoreProjectId),
         ...payload.chapters.map((c,i)=>insertChapter(restoreProjectId,c,i)),
-        db().prepare("UPDATE projects SET title=?,premise=?,summary=?,mainline=?,story_bible=?,important_notes=?,genre=?,style=?,updated_at=? WHERE id=?")
-          .bind(str(payload.project.title,120),str(payload.project.premise,12000),str(payload.project.summary,8000),str(payload.project.mainline,10000),str(payload.project.story_bible===undefined?previousStoryBible(payload.project,payload.characters,payload.cards):payload.project.story_bible,60000),str(payload.project.important_notes,6000),str(payload.project.genre,200),str(payload.project.style,8000),now(),restoreProjectId),
+        db().prepare("UPDATE projects SET title=?,premise=?,summary=?,mainline=?,story_bible=?,important_notes=?,genre=?,style=?,book_outline=?,tags=?,updated_at=? WHERE id=?")
+          .bind(str(payload.project.title,120),str(payload.project.premise,12000),str(payload.project.summary,8000),str(payload.project.mainline,10000),str(payload.project.story_bible===undefined?previousStoryBible(payload.project,payload.characters,payload.cards):payload.project.story_bible,60000),str(payload.project.important_notes,6000),str(payload.project.genre,200),str(payload.project.style,8000),str(payload.project.book_outline,16000),str(payload.project.tags,1000),now(),restoreProjectId),
         ...(payload.characters?[db().prepare("DELETE FROM characters WHERE project_id=?").bind(restoreProjectId),...payload.characters.map(c=>db().prepare("INSERT INTO characters (id,project_id,name,role,goal,traits,relationships,secret,arc,from_chapter,until_chapter,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").bind(String(c.id),restoreProjectId,str(c.name,120),str(c.role,200),str(c.goal,2000),str(c.traits,2000),str(c.relationships,2000),str(c.secret,2000),str(c.arc,2000),c.from_chapter??null,c.until_chapter??null,now()))]:[]),
         ...(payload.cards?[db().prepare("DELETE FROM lore_cards WHERE project_id=?").bind(restoreProjectId),...payload.cards.map(c=>db().prepare("INSERT INTO lore_cards (id,project_id,category,content,from_chapter,until_chapter,done,updated_at) VALUES (?,?,?,?,?,?,?,?)").bind(String(c.id),restoreProjectId,str(c.category,40),str(c.content,2500),c.from_chapter??null,c.until_chapter??null,Number(c.done)||0,now()))]:[])]);
+      await invalidateReferences(db(),restoreProjectId,"project",restoreProjectId);
+      await db().prepare("UPDATE consistency_checks SET stale=1 WHERE project_id=?").bind(restoreProjectId).run();
       return Response.json({id:restoreProjectId});
     }
     if(action==="saveLoreCard"&&projectId){

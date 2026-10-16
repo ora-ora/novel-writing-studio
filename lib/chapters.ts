@@ -6,6 +6,8 @@ export type Chapter = {
   synopsis: string;
   body: string;
   memory: string;
+  body_revision: number;
+  memory_revision: number;
   continuity_review: number;
   outline_revision: number;
   body_outline_revision: number | null;

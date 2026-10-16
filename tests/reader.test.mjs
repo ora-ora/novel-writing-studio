@@ -9,6 +9,7 @@ import { batchAround, fetchChapterBatch, hasBody } from "../lib/chapters.ts";
 import { moveChapterId } from "../lib/chapter-order.ts";
 import { mergeCreativeStyle } from "../lib/creative-style.ts";
 import { cleanAIChapterTitle } from "../lib/chapter-title.ts";
+import { selectSettings, contextBudget, fingerprint } from "../lib/longform.ts";
 
 const workspace = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const anotherWorkspace = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -44,6 +45,7 @@ async function harness(modelText, modelStream = false) {
   insertChapter.run("removed", "novel", 165, "已删除", "SECRET_DELETED", "SECRET_DELETED_BODY", "", "2026-10-15", "2026-10-15");
   insertChapter.run("foreign", "private", 0, "私人章节", "SECRET_PRIVATE", "SECRET_PRIVATE_BODY", "", "2026-10-15", null);
   insertChapter.run("trash-chapter", "trash", 0, "删除作品内正文", "", "PRESERVED_DELETED_BODY", "", "2026-10-15", null);
+  sqlite.prepare("UPDATE chapters SET memory_revision=body_revision WHERE memory<>''").run();
   const legacyProject = sqlite.prepare("SELECT * FROM projects WHERE id=?").get("novel");
   const legacyChapters = sqlite.prepare("SELECT * FROM chapters WHERE project_id=? AND deleted_at IS NULL ORDER BY position").all("novel");
   sqlite.prepare("INSERT INTO project_snapshots (id,project_id,reason,payload,created_at) VALUES (?,?,?,?,?)").run("before-sharing", "novel", "共享前版本", JSON.stringify({ project: legacyProject, chapters: legacyChapters }), "2026-10-15");
@@ -56,11 +58,12 @@ async function harness(modelText, modelStream = false) {
     fetch: async (_url, options) => {
       const payload = JSON.parse(options.body);
       const prompt = payload.messages[1].content; prompts.push(prompt);
+      const modelContent = typeof modelText === "function" ? modelText(prompt) : modelText;
       if (modelStream) {
-        const content = modelText ?? "离线测试稿";
+        const content = modelContent ?? "离线测试稿";
         return new Response(content.match(/.{1,12}/gs).map(delta => "data: " + JSON.stringify({ choices: [{ delta: { content: delta } }] }) + "\n\n").join("") + "data: [DONE]\n\n", { headers: { "Content-Type": "text/event-stream" } });
       }
-      return Response.json({ choices: [{ message: { content: modelText ?? (prompt.includes("JSON 数组") ? '[{"title":"离线大纲","synopsis":"测试"}]' : "离线测试稿") } }] });
+      return Response.json({ choices: [{ message: { content: modelContent ?? (prompt.includes("JSON 数组") ? '[{"title":"离线大纲","synopsis":"测试"}]' : "离线测试稿") } }] });
     },
   });
   const modules = new Map();
@@ -75,6 +78,7 @@ async function harness(modelText, modelStream = false) {
   }
   const route = await load(path.join(root, "app/api/workspace/route.ts"));
   const generate = await load(path.join(root, "app/api/generate/route.ts"));
+  const consistencyRoute = await load(path.join(root, "app/api/consistency/route.ts"));
   function get(params = {}, identity = workspace) {
     return route.namespace.GET(new Request(`https://novel.test/api/workspace?${new URLSearchParams({ view: "catalog", ...params })}`, { headers: identity ? { cookie: `novel_ws=${identity}` } : {} }));
   }
@@ -84,7 +88,11 @@ async function harness(modelText, modelStream = false) {
   function ai(fields = {}, identity = workspace) {
     return generate.namespace.POST(new Request("https://novel.test/api/generate", { method: "POST", headers: { ...(identity ? { cookie: `novel_ws=${identity}` } : {}), "Content-Type": "application/json" }, body: JSON.stringify({ kind: "body", projectId: "novel", selected: { id: "c164" }, chapters: [], endpoint: "https://model.example.test/v1/chat/completions", key: "offline-test-only", model: "offline", ...fields }) }));
   }
-  return { get, post, ai, prompts, database: sqlite, close: () => sqlite.close() };
+  function consistency(fields) {
+    return consistencyRoute.namespace.POST(new Request("https://novel.test/api/consistency", { method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({projectId:"novel",...fields}) }));
+  }
+  function details(projectId="novel") {return consistencyRoute.namespace.GET(new Request("https://novel.test/api/consistency?"+new URLSearchParams({projectId})));}
+  return { get, post, ai, consistency, details, prompts, database: sqlite, close: () => sqlite.close() };
 }
 
 test("shared directory is lightweight, merges former workspaces, and excludes deleted data", async () => {
@@ -387,6 +395,228 @@ test("stale or invalid reorder lists cannot drop, duplicate, or mix chapters", a
       assert.deepEqual(h.database.prepare("SELECT id FROM chapters WHERE project_id='novel' AND deleted_at IS NULL ORDER BY position").all().map(c => c.id), ids);
     }
   } finally { h.close(); }
+});
+
+test("setting retrieval matches unique aliases, respects explicit choices, and marks future secrets", () => {
+  const base={project_id:"novel",kind:"character",status:"confirmed",hard:0,source_chapter_id:null,source_revision:null,evidence:"",version:1,updated_at:"now",reveal_position:null};
+  const entries=[
+    {...base,id:"a",name:"张医生",aliases:'["老张","队长"]',content:"过去已死亡",reveal_position:10},
+    {...base,id:"b",name:"李队长",aliases:'["队长"]',content:"仍然在场"},
+    {...base,id:"rule",kind:"world",name:"不可复活",aliases:"[]",content:"死亡不可逆",hard:1}
+  ];
+  assert.deepEqual(selectSettings(entries,"老张在场",2).map(x=>x.entry.id),["rule","a"]);
+  assert.equal(selectSettings(entries,"老张在场",2).find(x=>x.entry.id==="a").secret,true);
+  assert.deepEqual(selectSettings(entries,"队长",2).map(x=>x.entry.id),["rule"]);
+  assert.deepEqual(selectSettings(entries,"",2,["b"],["rule"]).map(x=>x.entry.id),["b"]);
+  assert.equal(contextBudget(24000),15952);
+});
+
+test("batch extraction uses real body revisions, saves per-chapter memories, and resumes with a lease", async () => {
+  const model=JSON.stringify({summary:"独立摘要",facts:"正文明确事实",candidates:[
+    {kind:"character",name:"张医生",aliases:["老张"],content:"已死亡，发生在本章",evidence:"BODY_0"},
+    {kind:"world",name:"捏造事实",content:"不存在",evidence:"不在正文的证据"}
+  ]});
+  const h=await harness(model);
+  try{
+    const job=await (await h.consistency({action:"createJob",start:1,end:2})).json();
+    assert.equal((await h.consistency({action:"jobState",id:job.id,status:"running",owner:"tab-a"})).status,200);
+    assert.equal((await h.consistency({action:"jobState",id:job.id,status:"running",owner:"tab-b"})).status,409);
+    const result=await (await h.ai({kind:"extractChapter",selected:{id:"c0"}})).json();
+    assert.equal(result.bodyRevision,1);
+    const saved=await h.consistency({action:"saveExtraction",chapterId:"c0",bodyRevision:result.bodyRevision,result:JSON.parse(result.text),jobId:job.id,owner:"tab-a"});
+    assert.equal(saved.status,200);assert.equal((await saved.json()).rejected,1);
+    let data=await (await h.details()).json();
+    assert.equal(data.memories[0].summary,"独立摘要");assert.equal(data.entries.length,1);
+    assert.equal(data.entries[0].status,"candidate");
+    assert.equal(JSON.parse(data.jobs[0].completed).c0,1);
+    assert.equal((await h.consistency({action:"jobState",id:job.id,status:"paused",owner:"tab-a"})).status,200);
+    assert.equal((await h.consistency({action:"jobState",id:job.id,status:"running",owner:"tab-b"})).status,200);
+    await h.post({action:"updateChapter",id:"c0",body:"新正文"});
+    assert.equal((await h.consistency({action:"saveExtraction",chapterId:"c0",bodyRevision:1,result:JSON.parse(result.text)})).status,409);
+    assert.equal((await h.consistency({action:"acceptCandidates",ids:[data.entries[0].id]})).status,409);
+    data=await (await h.details()).json();assert.notEqual(data.memories[0].current_revision,data.memories[0].body_revision);
+    await h.ai({kind:"body",selected:{id:"c2"}});
+    assert.ok(!h.prompts.at(-1).includes("独立摘要"));
+  }finally{h.close();}
+});
+
+test("reference snapshots identify exact impacts; adopting a draft does not invalidate its own baseline", async () => {
+ const h=await harness();
+ try{
+  const entry=await (await h.consistency({action:"saveEntry",kind:"character",name:"张医生",aliases:["老张"],content:"已死亡",status:"confirmed"})).json();
+  const response=await h.ai({kind:"body",selected:{id:"c2"},instruction:"老张的往事"});
+  assert.equal(response.status,200);const result=await response.json();
+  assert.ok(result.runId);assert.ok(h.prompts.at(-1).includes("已死亡"));
+  let run=h.database.prepare("SELECT * FROM reference_runs WHERE id=?").get(result.runId);
+  const refs=JSON.parse(run.refs);
+  assert.ok(refs.some(r=>r.type==="setting"&&r.id===entry.id&&r.version===1));
+  assert.ok(JSON.parse(run.snapshot).prompt.includes("已死亡"));
+  await h.post({action:"updateChapter",id:"c2",body:"采用的新正文"});
+  assert.equal((await h.consistency({action:"adoptRun",runId:result.runId})).status,200);
+  assert.equal(h.database.prepare("SELECT stale FROM reference_runs WHERE id=?").get(result.runId).stale,0);
+  assert.equal((await h.consistency({action:"saveEntry",id:entry.id,version:1,kind:"character",name:"张医生",aliases:["老张"],content:"失踪，未确认死亡",status:"confirmed"})).status,200);
+  assert.equal(h.database.prepare("SELECT stale FROM reference_runs WHERE id=?").get(result.runId).stale,1);
+  assert.equal(h.database.prepare("SELECT continuity_review FROM chapters WHERE id='c2'").get().continuity_review,1);
+  assert.equal(h.database.prepare("SELECT continuity_review FROM chapters WHERE id='c100'").get().continuity_review,0);
+  assert.equal((await h.consistency({action:"saveEntry",id:entry.id,version:1,kind:"character",name:"张医生",content:"过期修改",status:"confirmed"})).status,409);
+  assert.equal(h.database.prepare("SELECT COUNT(*) AS n FROM setting_versions WHERE entry_id=?").get(entry.id).n,2);
+ }finally{h.close();}
+});
+
+test("a check stores evidenced findings and resolutions and becomes stale after a referenced change",async()=>{
+ let entryId;
+ const h=await harness(()=>JSON.stringify({findings:[{severity:"conflict",quote:"老张走进房间",referenceId:entryId,evidence:"已确认死亡",reason:"人物无解释复活",suggestion:"改为回忆"}]}));
+ try{
+  entryId=(await (await h.consistency({action:"saveEntry",kind:"character",name:"张医生",aliases:["老张"],content:"已确认死亡",status:"confirmed"})).json()).id;
+  const response=await h.ai({kind:"checkDraft",selected:{id:"c2"},draft:"老张走进房间"});
+  assert.equal(response.status,200);const result=await response.json();
+  assert.ok(result.checkId);assert.equal(JSON.parse(result.text).findings[0].sourceLabel,"张医生");
+  const check=h.database.prepare("SELECT * FROM consistency_checks WHERE id=?").get(result.checkId);
+  assert.equal(check.draft_hash,await fingerprint("老张走进房间"));
+  await h.consistency({action:"resolveFinding",id:result.checkId,index:0,resolution:"有意安排"});
+  assert.equal(JSON.parse(h.database.prepare("SELECT resolutions FROM consistency_checks WHERE id=?").get(result.checkId).resolutions)["0"],"有意安排");
+  await h.consistency({action:"saveEntry",id:entryId,version:1,kind:"character",name:"张医生",aliases:["老张"],content:"死亡记录不可靠",status:"confirmed"});
+  assert.equal(h.database.prepare("SELECT stale FROM consistency_checks WHERE id=?").get(result.checkId).stale,1);
+ }finally{h.close();}
+});
+
+test("unverifiable check citations are rejected rather than shown as authoritative findings",async()=>{
+ const h=await harness(JSON.stringify({findings:[{quote:"原句",referenceId:"unknown",evidence:"捏造",reason:"冲突"}]}));
+ try{
+  assert.equal((await h.ai({kind:"checkDraft",selected:{id:"c0"},draft:"原句"})).status,502);
+  assert.equal(h.database.prepare("SELECT COUNT(*) AS n FROM consistency_checks").get().n,0);
+ }finally{h.close();}
+});
+
+test("candidate confirmation rejects conflicting identities without changing official facts",async()=>{
+ const h=await harness();
+ try{
+  await h.consistency({action:"saveEntry",kind:"character",name:"张医生",content:"已死亡",status:"confirmed"});
+  await h.consistency({action:"saveExtraction",chapterId:"c0",bodyRevision:1,result:{summary:"摘要",facts:"事实",candidates:[{kind:"character",name:"张医生",content:"仍活着",evidence:"BODY_0"}]}});
+  const data=await (await h.details()).json();const candidate=data.entries.find(e=>e.status==="candidate");
+  assert.equal((await h.consistency({action:"acceptCandidates",ids:[candidate.id]})).status,409);
+  assert.equal(h.database.prepare("SELECT content FROM setting_entries WHERE status='confirmed'").get().content,"已死亡");
+ }finally{h.close();}
+});
+
+test("manual chapter memory edits replace current memory and invalidate its references",async()=>{
+ const h=await harness();
+ try{
+  await h.consistency({action:"saveExtraction",chapterId:"c0",bodyRevision:1,result:{summary:"旧摘要",facts:"事实",candidates:[]}});
+  const result=await (await h.ai({kind:"body",selected:{id:"c2"}})).json();
+  await h.post({action:"updateChapter",id:"c0",memory:"作者修正的摘要"});
+  assert.equal(h.database.prepare("SELECT summary FROM chapter_memories WHERE chapter_id='c0'").get().summary,"作者修正的摘要");
+  assert.equal(h.database.prepare("SELECT stale FROM reference_runs WHERE id=?").get(result.runId).stale,1);
+  await h.consistency({action:"adoptRun",runId:result.runId});
+  assert.equal(h.database.prepare("SELECT stale FROM reference_runs WHERE id=?").get(result.runId).stale,1);
+ }finally{h.close();}
+});
+
+test("context refuses to drop required rules or truncate the target body to fit a small budget",async()=>{
+ const h=await harness();
+ try{
+  for(let i=0;i<2;i++)await h.consistency({action:"saveEntry",kind:"world",name:"规则"+i,content:"必须遵守。".repeat(900),hard:true,status:"confirmed"});
+  const response=await h.ai({kind:"body",selected:{id:"c2"},contextWindow:12000});
+  assert.notEqual(response.status,200);assert.equal(h.prompts.length,0);
+ }finally{h.close();}
+ const separate=await harness();
+ try{
+  await separate.post({action:"updateChapter",id:"c0",body:"完整正文".repeat(8000)});
+  const large=await separate.ai({kind:"bodyRewrite",selected:{id:"c0"},contextWindow:12000});
+  assert.equal(large.status,400);assert.equal(separate.prompts.length,0);
+ }finally{separate.close();}
+});
+
+test("shared editor compare-and-save protects newer body and outline revisions",async()=>{
+ const h=await harness();
+ try{
+  assert.equal((await h.post({action:"updateChapter",id:"c0",body:"新正文",expectedBodyRevision:1})).status,200);
+  assert.equal((await h.post({action:"updateChapter",id:"c0",body:"过期正文",expectedBodyRevision:1})).status,409);
+  assert.equal(h.database.prepare("SELECT body FROM chapters WHERE id='c0'").get().body,"新正文");
+  assert.equal((await h.post({action:"updateChapter",id:"c0",title:"新标题",expectedOutlineRevision:1})).status,200);
+  assert.equal((await h.post({action:"updateChapter",id:"c0",title:"过期标题",expectedOutlineRevision:1})).status,409);
+  assert.equal(h.database.prepare("SELECT title FROM chapters WHERE id='c0'").get().title,"新标题");
+ }finally{h.close();}
+});
+
+test("full-book consistency scans persist their task type and checked revisions across resume",async()=>{
+ const h=await harness('{"findings":[]}');
+ try{
+  const job=await (await h.consistency({action:"createJob",kind:"scan",start:1,end:1})).json();
+  await h.consistency({action:"jobState",id:job.id,status:"running",owner:"scan"});
+  const checked=await h.ai({kind:"checkDraft",selected:{id:"c0"},draft:"BODY_0\nPREVIOUS_END_0"});
+  assert.equal(checked.status,200);assert.ok((await checked.json()).checkId);
+  assert.equal((await h.consistency({action:"jobProgress",id:job.id,chapterId:"c0",bodyRevision:1,owner:"scan"})).status,200);
+  await h.consistency({action:"jobState",id:job.id,status:"completed",owner:"scan"});
+  const data=await (await h.details()).json();assert.equal(data.jobs[0].kind,"scan");
+  assert.equal(JSON.parse(data.jobs[0].completed).c0,1);
+  await h.post({action:"updateChapter",id:"c0",body:"修改后"});
+  assert.equal((await h.consistency({action:"jobProgress",id:job.id,chapterId:"c0",bodyRevision:1,owner:"scan"})).status,409);
+ }finally{h.close();}
+});
+
+test("candidate insertion and memory writes do not alter existing body text",async()=>{
+ const h=await harness();
+ try{
+  const before=h.database.prepare("SELECT id,body FROM chapters ORDER BY id").all();
+  await h.consistency({action:"saveExtraction",chapterId:"c0",bodyRevision:1,result:{summary:"摘要",facts:"事实",candidates:[{kind:"timeline",name:"第一天",content:"事件发生",evidence:"BODY_0"}]}});
+  const candidate=(await (await h.details()).json()).entries[0];
+  assert.equal((await h.consistency({action:"acceptCandidates",ids:[candidate.id]})).status,200);
+  assert.deepEqual(h.database.prepare("SELECT id,body FROM chapters ORDER BY id").all(),before);
+  assert.equal((await h.details("trash")).status,404);
+  assert.equal((await h.consistency({action:"saveMemory",chapterId:"foreign",bodyRevision:1,summary:"跨作品"})).status,409);
+ }finally{h.close();}
+});
+
+test("freeform setting organization verifies original evidence and source changes",async()=>{
+ const h=await harness(JSON.stringify({candidates:[{kind:"world",name:"不可复活",content:"死亡不可逆",evidence:"死亡不可逆",hard:true}]}));
+ try{
+  const old=(await (await h.get()).json()).projects.find(p=>p.id==="novel");
+  await h.post({...old,action:"updateProject",story_bible:"# 世界规则\n死亡不可逆"});
+  const result=await (await h.ai({kind:"organizeSettings",selected:undefined})).json();
+  assert.equal((await h.consistency({action:"saveSettingExtraction",sourceHash:result.sourceHash,result:JSON.parse(result.text)})).status,200);
+  const data=await (await h.details()).json();
+  assert.equal(data.entries[0].status,"candidate");
+  assert.equal((await h.consistency({action:"acceptCandidates",ids:[data.entries[0].id]})).status,200);
+  assert.equal(h.database.prepare("SELECT status FROM setting_entries LIMIT 1").get().status,"confirmed");
+  await h.post({...old,action:"updateProject",story_bible:"修改后的规则"});
+  assert.equal((await h.consistency({action:"saveSettingExtraction",sourceHash:result.sourceHash,result:JSON.parse(result.text)})).status,409);
+ }finally{h.close();}
+});
+
+test("book outline and labels persist independently of chapter outlines and bodies",async()=>{
+ const h=await harness();
+ try{
+  const old=(await (await h.get()).json()).projects.find(p=>p.id==="novel");
+  assert.equal((await h.post({...old,action:"updateProject",book_outline:"开端—转折—结局",tags:"连载中，悬疑"})).status,200);
+  const saved=(await (await h.get()).json()).projects.find(p=>p.id==="novel");
+  assert.equal(saved.book_outline,"开端—转折—结局");assert.equal(saved.tags,"连载中，悬疑");
+  assert.equal(h.database.prepare("SELECT synopsis FROM chapters WHERE id='c0'").get().synopsis,"SYNOPSIS_0");
+  assert.equal((await h.ai({kind:"projectField",field:"book_outline",operation:"generate",selected:undefined,book_outline:saved.book_outline})).status,200);
+  assert.ok(h.prompts.at(-1).includes("全书大纲"));
+ }finally{h.close();}
+});
+
+test("reveal boundaries follow chapter IDs through insertion and distant reorder without flagging unrelated appends",async()=>{
+ const h=await harness();
+ try{
+  const entry=(await (await h.consistency({action:"saveEntry",kind:"foreshadow",name:"暗号",content:"真相尚未揭露",reveal_position:10,status:"confirmed"})).json()).id;
+  assert.equal(h.database.prepare("SELECT reveal_chapter_id FROM setting_entries WHERE id=?").get(entry).reveal_chapter_id,"c10");
+  const generated=await (await h.ai({kind:"body",selected:{id:"c5"},instruction:"暗号"})).json();
+  assert.ok(h.prompts.at(-1).includes("本章禁止揭露"));
+  await h.post({action:"addChapter",projectId:"novel",title:"末章"});
+  assert.equal(h.database.prepare("SELECT stale FROM reference_runs WHERE id=?").get(generated.runId).stale,0);
+  await h.post({action:"insertOutline",projectId:"novel",afterChapterId:"",chapters:[{title:"新增开篇",synopsis:"过渡"}]});
+  assert.equal(h.database.prepare("SELECT reveal_chapter_id FROM setting_entries WHERE id=?").get(entry).reveal_chapter_id,"c10");
+  let rows=(await (await h.get()).json()).chapters.filter(c=>c.project_id==="novel");
+  const fresh=await (await h.ai({kind:"body",selected:{id:"c5"},instruction:"暗号"})).json();
+  assert.ok(h.prompts.at(-1).includes("本章禁止揭露"));
+  const ordered=moveChapterId(rows.map(c=>c.id),"c10",0);
+  assert.equal((await h.post({action:"reorder",projectId:"novel",ids:ordered})).status,200);
+  assert.equal(h.database.prepare("SELECT stale FROM reference_runs WHERE id=?").get(fresh.runId).stale,1);
+  await h.ai({kind:"body",selected:{id:"c5"},instruction:"暗号"});
+  assert.ok(!h.prompts.at(-1).includes("作者秘密，本章禁止揭露"));
+ }finally{h.close();}
 });
 
 test("browser batch loader rejects missing chapters instead of silently exporting partial content", async () => {

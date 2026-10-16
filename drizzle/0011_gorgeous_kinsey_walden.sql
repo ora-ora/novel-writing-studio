@@ -1,0 +1,1 @@
+ALTER TABLE `extraction_jobs` ADD `kind` text DEFAULT 'extract' NOT NULL;
